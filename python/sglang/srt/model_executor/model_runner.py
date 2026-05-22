@@ -3056,6 +3056,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self.piecewise_cuda_graph_runner is not None
             and self.piecewise_cuda_graph_runner.can_run(forward_batch)
         )
+        logger.debug(f"wlax: Can run piecewise CUDA graph: {can_run_graph}, forward batch: {forward_batch.input_ids.shape}")
         if can_run_graph:
             # TODO: device_timer.wrap is too broad here — it also includes
             # replay_prepare time. Move timing into the piecewise cuda graph
@@ -3067,6 +3068,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
             with ctx:
                 ret = self.piecewise_cuda_graph_runner.replay(forward_batch, **kwargs)
+                logger.debug("wlax: replay piecewise CUDA graph done")
             return (ret, can_run_graph)
 
         # Launch model forward

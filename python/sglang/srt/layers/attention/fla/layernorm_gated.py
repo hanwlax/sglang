@@ -7,6 +7,7 @@
 
 
 from functools import lru_cache
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +16,7 @@ import triton.language as tl
 from einops import rearrange
 
 from sglang.srt.server_args import get_global_server_args
+from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils import (
     cdiv,
     cpu_has_amx_support,
@@ -271,7 +273,58 @@ def _layer_norm_fwd(
 
 
 if _is_npu:
-    from sgl_kernel_npu.fla.layernorm_gated import layer_norm_fwd_npu as _layer_norm_fwd
+    from sgl_kernel_npu.fla.layernorm_gated import layer_norm_fwd_npu as _layer_norm_fwd_npu_raw
+
+    @register_custom_op(out_shape="x", mutates_args=["mean_buf", "rstd_buf"])
+    def _layer_norm_fwd_custom(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        eps: float,
+        z: Optional[torch.Tensor],
+        out: Optional[torch.Tensor],
+        mean_buf: torch.Tensor,
+        rstd_buf: torch.Tensor,
+        group_size: Optional[int],
+        norm_before_gate: bool,
+        is_rms_norm: bool,
+        activation: Optional[str],
+    ) -> torch.Tensor:
+        _out, _mean, _rstd = _layer_norm_fwd_npu_raw(
+            x=x,
+            weight=weight,
+            bias=bias,
+            eps=eps,
+            z=z,
+            out=out,
+            group_size=group_size,
+            norm_before_gate=norm_before_gate,
+            is_rms_norm=is_rms_norm,
+            activation=activation,
+        )
+        return _out
+
+    def _layer_norm_fwd(
+        x, weight, bias, eps, z=None, out=None, group_size=None,
+        norm_before_gate=True, is_rms_norm=False, activation=None,
+    ):
+        M, N = x.shape
+        if group_size is None:
+            group_size = N
+        ngroups = N // group_size
+        if out is not None:
+            assert out.shape == x.shape
+        else:
+            out = torch.empty_like(x)
+        mean_buf = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
+        rstd_buf = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
+        y = _layer_norm_fwd_custom(
+            x=x, weight=weight, bias=bias, eps=eps, z=z, out=out,
+            mean_buf=mean_buf, rstd_buf=rstd_buf, group_size=group_size,
+            norm_before_gate=norm_before_gate, is_rms_norm=is_rms_norm,
+            activation=activation,
+        )
+        return y, mean_buf if not is_rms_norm else None, rstd_buf
 
 
 def rms_norm_gated(
