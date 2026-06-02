@@ -27,6 +27,7 @@ Backend selection comes from cuda_graph_config.prefill:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import warnings
 from typing import TYPE_CHECKING, Dict, Optional, Union
@@ -261,7 +262,31 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         self.model_runner.tp_group.barrier()
         self.capture()
 
+        # PCG warmup/capture runs the linear-attention (mamba/GDN) recurrence on
+        # dummy (zero) inputs over the full padded length, using req_pool_index 0
+        # which maps to the mamba *dummy slot 0*. A long (e.g. 128-step) recurrence
+        # on garbage input writes diverging/non-zero state into that shared slot.
+        # During real serving, decode/verify reads slot 0 for padding positions, so
+        # the poisoned state corrupts MTP verify (garbled output; the state then
+        # explodes to ~1e19 over decode steps). Capture runs before any real
+        # request, so restore the pristine all-zero mamba state here.
+        self._reset_mamba_state_after_capture()
+
         self.raw_num_tokens = 0
+        
+    def _reset_mamba_state_after_capture(self) -> None:
+        mamba_pool = getattr(self.model_runner.req_to_token_pool, "mamba_pool", None)
+        if mamba_pool is None:
+            return
+        cache = mamba_pool.mamba_cache
+        if not dataclasses.is_dataclass(cache):
+            return
+        for f in dataclasses.fields(cache):
+            v = getattr(cache, f.name)
+            for t in v if isinstance(v, (list, tuple)) else [v]:
+                if isinstance(t, torch.Tensor):
+                    t.zero_()
+
 
     def _is_mamba_track_enabled(self) -> bool:
         return (
