@@ -11,9 +11,9 @@ from sglang.srt.compilation.cuda_piecewise_backend import (
     CUDAPiecewiseBackend,
     weak_ref_tensors,
 )
-from sglang.srt.compilation.piecewise_context_manager import (
+from sglang.srt.compilation.compile_phase import (
     get_pcg_capture_stream,
-    is_in_pcg_torch_compile,
+    is_in_torch_compile_warmup,
 )
 
 
@@ -43,7 +43,7 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
         )
 
     def __call__(self, *args):
-        if is_in_pcg_torch_compile():
+        if is_in_torch_compile_warmup():
             return self.compiled_graph_for_general_shape(*args)
 
         if len(self.sym_shape_indices) == 0:

@@ -1235,7 +1235,8 @@ class Qwen3_5ForCausalLM(nn.Module):
             layer = self.layers[layer_idx]
             ctx = (
                 nullcontext()
-                if not get_global_server_args().disable_piecewise_cuda_graph
+                if get_global_server_args().cuda_graph_config is not None
+                and get_global_server_args().cuda_graph_config.prefill.backend == Backend.TC_PIECEWISE
                 else get_global_expert_distribution_recorder().with_current_layer(
                     layer_idx
                 )
