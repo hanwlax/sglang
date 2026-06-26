@@ -1,3 +1,4 @@
+import os
 from contextlib import ExitStack
 from typing import Any, Callable
 from unittest.mock import patch
@@ -15,6 +16,16 @@ from sglang.srt.compilation.cuda_piecewise_backend import (
     CUDAPiecewiseBackend,
     weak_ref_tensors,
 )
+from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
+    get_tc_piecewise_forward_context,
+)
+
+# SGLANG_NPU_PROFILE_FWD=N  — profile forward #N with torch_npu.profiler
+# SGLANG_NPU_PROFILE_DIR=path — output directory (default: /tmp/npu_profile)
+_PROFILE_FWD = int(os.environ.get("SGLANG_NPU_PROFILE_FWD", "0"))
+_PROFILE_DIR = os.environ.get("SGLANG_NPU_PROFILE_DIR", "/tmp/npu_profile")
+_profile_ctx = None
+_pcg_fwd_count: int = 0
 
 
 class NPUPiecewiseBackend(CUDAPiecewiseBackend):
@@ -120,5 +131,44 @@ class NPUPiecewiseBackend(CUDAPiecewiseBackend):
                 "Input addresses for cudagraphs are different during replay."
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
+
+        if _PROFILE_FWD:
+            global _profile_ctx, _pcg_fwd_count
+            if self.is_first_graph:
+                _pcg_fwd_count += 1
+                if _pcg_fwd_count == _PROFILE_FWD:
+                    import torch_npu.profiler as npu_prof
+
+                    chunk_tag = ""
+                    ctx = get_tc_piecewise_forward_context()
+                    if ctx and ctx.forward_batch is not None:
+                        fb = ctx.forward_batch
+                        prefix = int(fb.extend_prefix_lens[0].item()) if fb.extend_prefix_lens is not None and len(fb.extend_prefix_lens) > 0 else -1
+                        seq_kv = int(fb.seq_lens[0].item()) if fb.seq_lens is not None and len(fb.seq_lens) > 0 else -1
+                        chunk_tag = f"_prefix{prefix}_seqkv{seq_kv}"
+
+                    out_dir = os.path.join(
+                        _PROFILE_DIR, f"pcg_fwd{_pcg_fwd_count}_shape{runtime_shape}{chunk_tag}"
+                    )
+                    os.makedirs(out_dir, exist_ok=True)
+                    _profile_ctx = npu_prof.profile(
+                        activities=[
+                            npu_prof.ProfilerActivity.CPU,
+                            npu_prof.ProfilerActivity.NPU,
+                        ],
+                        on_trace_ready=npu_prof.tensorboard_trace_handler(out_dir),
+                    )
+                    _profile_ctx.__enter__()
+                    print(
+                        f"[PCG Profile] START fwd#{_pcg_fwd_count} "
+                        f"shape={runtime_shape}{chunk_tag} -> {out_dir}"
+                    )
+
         entry.cudagraph.replay()
+
+        if _PROFILE_FWD and self.is_last_graph and _profile_ctx is not None:
+            _profile_ctx.__exit__(None, None, None)
+            print(f"[PCG Profile] END fwd#{_pcg_fwd_count}")
+            _profile_ctx = None
+
         return entry.output

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Tuple, Union
 
@@ -41,12 +42,18 @@ from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph impo
     enable_tc_piecewise_cuda_graph,
     set_tc_piecewise_forward_context,
 )
-from sglang.srt.utils import is_hip
+from sglang.srt.utils import is_hip, is_npu
 from sglang.srt.utils.common import ceil_align, require_mlp_sync
 
 logger = logging.getLogger(__name__)
 
 _is_hip = is_hip()
+_is_npu = is_npu()
+
+# NPU profiling for eager forward — same env vars as PCG path
+_EAGER_PROFILE_FWD = int(os.environ.get("SGLANG_NPU_PROFILE_FWD", "0")) if is_npu() else 0
+_EAGER_PROFILE_DIR = os.environ.get("SGLANG_NPU_PROFILE_DIR", "/tmp/npu_profile")
+_eager_fwd_count: int = 0
 
 if TYPE_CHECKING:
     from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -348,12 +355,57 @@ class EagerRunner(BaseRunner):
                 else:
                     ret = hidden_states
             else:
-                ret = model_runner.model.forward(
-                    forward_batch.input_ids,
-                    forward_positions,
-                    forward_batch,
-                    **kwargs,
-                )
+                if _EAGER_PROFILE_FWD and _is_npu:
+                    global _eager_fwd_count
+                    _eager_fwd_count += 1
+                    if _eager_fwd_count == _EAGER_PROFILE_FWD:
+                        import torch_npu.profiler as npu_prof
+
+                        shape = len(forward_batch.input_ids)
+                        chunk_tag = ""
+                        if forward_batch.extend_prefix_lens is not None and len(forward_batch.extend_prefix_lens) > 0:
+                            prefix = int(forward_batch.extend_prefix_lens[0].item())
+                            seq_kv = int(forward_batch.seq_lens[0].item()) if forward_batch.seq_lens is not None and len(forward_batch.seq_lens) > 0 else -1
+                            chunk_tag = f"_prefix{prefix}_seqkv{seq_kv}"
+                        out_dir = os.path.join(
+                            _EAGER_PROFILE_DIR,
+                            f"eager_fwd{_eager_fwd_count}_shape{shape}{chunk_tag}",
+                        )
+                        os.makedirs(out_dir, exist_ok=True)
+                        print(
+                            f"[Eager Profile] START fwd#{_eager_fwd_count} "
+                            f"shape={shape}{chunk_tag} -> {out_dir}"
+                        )
+                        with npu_prof.profile(
+                            activities=[
+                                npu_prof.ProfilerActivity.CPU,
+                                npu_prof.ProfilerActivity.NPU,
+                            ],
+                            on_trace_ready=npu_prof.tensorboard_trace_handler(
+                                out_dir
+                            ),
+                        ):
+                            ret = model_runner.model.forward(
+                                forward_batch.input_ids,
+                                forward_positions,
+                                forward_batch,
+                                **kwargs,
+                            )
+                        print(f"[Eager Profile] END fwd#{_eager_fwd_count}")
+                    else:
+                        ret = model_runner.model.forward(
+                            forward_batch.input_ids,
+                            forward_positions,
+                            forward_batch,
+                            **kwargs,
+                        )
+                else:
+                    ret = model_runner.model.forward(
+                        forward_batch.input_ids,
+                        forward_positions,
+                        forward_batch,
+                        **kwargs,
+                    )
         return ret
 
     def _execute_idle(

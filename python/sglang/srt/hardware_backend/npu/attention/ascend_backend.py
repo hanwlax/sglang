@@ -1527,6 +1527,9 @@ class AscendAttnBackend(AttentionBackend):
                         ),
                         logit_cap=layer.logit_cap,
                         logit_capping_method=layer.logit_capping_method,
+                        seq_lens_cpu=forward_batch.seq_lens_cpu,
+                        extend_prefix_lens_cpu=forward_batch.extend_prefix_lens_cpu,
+                        extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
                     )
                     attn_output = attn_output.view(
                         -1, layer.tp_q_head_num * layer.v_head_dim
@@ -1762,6 +1765,9 @@ class AscendAttnBackend(AttentionBackend):
                     scaling=layer.scaling,
                     enable_gqa=use_gqa,
                     causal=True,
+                    seq_lens_cpu=forward_batch.seq_lens_cpu,
+                    extend_prefix_lens_cpu=forward_batch.extend_prefix_lens_cpu,
+                    extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
                 )
             else:
                 num_token_padding = q.shape[0]

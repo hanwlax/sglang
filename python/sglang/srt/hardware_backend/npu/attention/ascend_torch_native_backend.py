@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import List, Optional, Union
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
@@ -74,6 +74,9 @@ class AscendTorchNativeAttnBackend:
         full_to_swa_mapping: Optional[torch.Tensor] = None,
         logit_cap: float = 0.0,
         logit_capping_method: str = "tanh",
+        seq_lens_cpu: Optional[Union[List[int], torch.Tensor]] = None,
+        extend_prefix_lens_cpu: Optional[Union[List[int], torch.Tensor]] = None,
+        extend_seq_lens_cpu: Optional[Union[List[int], torch.Tensor]] = None,
     ):
         """Run the extend forward by using torch native sdpa op.
 
@@ -95,6 +98,9 @@ class AscendTorchNativeAttnBackend:
             sliding_window_size: int, -1 means no sliding window
             full_to_swa_mapping: mapping from full pool index to SWA pool index,
                 required for SWA layers to translate req_to_token indices
+            seq_lens_cpu: pre-copied host values to avoid D2H sync
+            extend_prefix_lens_cpu: pre-copied host values to avoid D2H sync
+            extend_seq_lens_cpu: pre-copied host values to avoid D2H sync
 
         Returns:
             output: [num_tokens, num_heads, head_size]
@@ -103,17 +109,21 @@ class AscendTorchNativeAttnBackend:
         assert seq_lens.shape[0] == extend_prefix_lens.shape[0]
         assert seq_lens.shape[0] == extend_seq_lens.shape[0]
 
+        def _cpu_val(cpu_list, device_tensor, idx):
+            if cpu_list is not None:
+                v = cpu_list[idx]
+                return int(v.item()) if isinstance(v, torch.Tensor) else int(v)
+            return int(device_tensor[idx].item())
+
         # [num_tokens, num_heads, head_size] -> [num_heads, num_tokens, head_size]
         query = query.movedim(0, query.dim() - 2)
 
         start_q, start_kv = 0, 0
         for seq_idx in range(seq_lens.shape[0]):
-            # Need optimize the performance later.
+            extend_seq_len_q = _cpu_val(extend_seq_lens_cpu, extend_seq_lens, seq_idx)
+            prefill_seq_len_q = _cpu_val(extend_prefix_lens_cpu, extend_prefix_lens, seq_idx)
 
-            extend_seq_len_q = int(extend_seq_lens[seq_idx].item())
-            prefill_seq_len_q = int(extend_prefix_lens[seq_idx].item())
-
-            seq_len_kv = int(seq_lens[seq_idx].item())
+            seq_len_kv = _cpu_val(seq_lens_cpu, seq_lens, seq_idx)
             end_q = start_q + extend_seq_len_q
             end_kv = start_kv + seq_len_kv
             atten_start_kv = 0
