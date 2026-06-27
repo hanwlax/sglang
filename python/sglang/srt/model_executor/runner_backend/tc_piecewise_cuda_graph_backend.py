@@ -137,6 +137,13 @@ class TcPiecewiseCudaGraphBackend(BaseCudaGraphBackend):
         if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake():
             config.add_split_op("sglang.moe_forward_piecewise_cuda_graph_impl")
 
+        if is_npu():
+            # On NPU, HCCL allreduce is capturable inside NPUGraph (the decode
+            # full-graph path already does this).  Keeping inplace_all_reduce as
+            # a split point only adds extra NPUGraph.replay() overhead (~95 µs
+            # per segment) for no benefit.
+            config.remove_split_op("sglang.inplace_all_reduce")
+
         return config
 
     @staticmethod

@@ -35,6 +35,9 @@ class CompilationConfig:
     def add_split_op(self, op: str):
         self.split_ops.append(op)
 
+    def remove_split_op(self, op: str):
+        self.split_ops = [s for s in self.split_ops if s != op]
+
     def add_traced_file(self, file_path: str):
         self.traced_files.add(file_path)
 
