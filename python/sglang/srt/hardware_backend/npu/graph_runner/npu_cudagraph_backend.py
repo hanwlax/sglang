@@ -53,6 +53,7 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         self._outputs: Dict[Any, Any] = {}
         self._pool = None
         self._device_module = cuda_graph_runner.device_module
+        self._device_id = self._device_module.current_device()
         self._tp_group = cuda_graph_runner.model_runner.tp_group
         self._capture_stream = None
         self._memory_saver_adapter: Optional[Any] = TorchMemorySaverAdapter.create(
@@ -163,6 +164,10 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         graph = self._graphs[shape_key]
 
         def _update():
+            # The NPU device context is thread-local. Without restoring it here,
+            # NPUGraph.update() lazily opens device 0 in this worker thread and
+            # can race with replay or fail with a null device context.
+            self._device_module.set_device(self._device_id)
             graph.update(cpu_update_input=cpu_update_input)
 
         thread = threading.Thread(target=_update)

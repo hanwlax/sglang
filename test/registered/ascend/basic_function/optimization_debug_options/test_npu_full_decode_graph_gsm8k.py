@@ -62,7 +62,7 @@ COMMON_ARGS: List[str] = [
     "--kv-cache-dtype",
     "auto",
     "--max-running-requests",
-    "1024",
+    "128",
     "--chunked-prefill-size",
     "8192",
     "--max-prefill-tokens",
@@ -75,7 +75,7 @@ COMMON_ARGS: List[str] = [
     "4",
     "8",
     "--enable-dp-attention",
-    "--dp-size", "2",
+    "--dp-size", "16",
     "--moe-a2a-backend", "deepep",
     "--deepep-mode", "auto",
 ]
@@ -138,7 +138,6 @@ class TestNpuFullDecodeGraphGsm8k(CustomTestCase):
                 num_examples=GSM8K_NUM_QUESTIONS,
                 num_threads=128,
                 max_tokens=512,
-                stop=["Question", "Assistant:", "<|separator|>"],
                 base_url=self.base_url,
             )
             metrics = run_eval(args)

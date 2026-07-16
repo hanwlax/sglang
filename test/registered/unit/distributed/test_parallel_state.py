@@ -36,6 +36,7 @@ not the per-rank group membership logic.
 
 from __future__ import annotations
 
+import os
 import sys
 from unittest.mock import Mock, patch
 
@@ -48,6 +49,29 @@ register_amd_ci(est_time=8, suite="stage-b-test-1-gpu-small-amd")
 
 # Import the actual parallel_state module
 parallel_state = pytest.importorskip("sglang.srt.distributed.parallel_state")
+
+
+def test_npu_deepep_hccl_buffer_is_not_applied_to_world_group():
+    with patch.dict(
+        os.environ,
+        {"DEEPEP_HCCL_BUFFSIZE": "1200"},
+        clear=True,
+    ):
+        assert parallel_state._get_npu_hccl_buffer_size() == 200
+        assert parallel_state._get_npu_hccl_buffer_size("moe_ep") == 1200
+
+
+def test_npu_world_group_uses_explicit_global_hccl_buffer_size():
+    with patch.dict(
+        os.environ,
+        {
+            "DEEPEP_HCCL_BUFFSIZE": "1200",
+            "HCCL_BUFFSIZE": "400",
+        },
+        clear=True,
+    ):
+        assert parallel_state._get_npu_hccl_buffer_size() == 400
+        assert parallel_state._get_npu_hccl_buffer_size("moe_ep") == 1200
 
 
 def test_parallel_group_construction_tp8_attn_cp2():
