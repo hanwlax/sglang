@@ -287,7 +287,7 @@ class DFlashWorkerV2(BaseSpecWorker):
 
     def init_cuda_graphs(self):
         capture_decode_cuda_graph = (
-            self.server_args.cuda_graph_config.decode.backend != Backend.DISABLED
+            not self.server_args.disable_cuda_graph and not _is_npu
         )
         if is_cuda() and capture_decode_cuda_graph:
             available_mem = get_available_gpu_memory(self.device, self.gpu_id)
@@ -1277,8 +1277,12 @@ class DFlashWorkerV2(BaseSpecWorker):
                 ctx_lens,
                 int(sum(batch.extend_lens)),
             )
+
+            num_valid_tokens = int(batch.out_cache_loc.numel())
+            target_hidden = logits_output.hidden_states[:num_valid_tokens]
+
             self._append_target_hidden_to_draft_kv_by_loc(
-                target_hidden=logits_output.hidden_states,
+                target_hidden=target_hidden,
                 cache_loc=batch.out_cache_loc,
                 positions=positions,
             )
