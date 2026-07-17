@@ -1980,6 +1980,87 @@ class AscendAttnBackend(AttentionBackend):
                     learnable_sink=sinks,
                 )
             else:
+                # DFLASH long-context diagnostics. Keep this rate limited because
+                # forward_mtp is called once per attention layer and draft step.
+                max_kv_len = max(actual_seq_lengths_kv, default=0)
+                debug_bucket = max_kv_len // 1024
+                fia_block_table = self.forward_metadata.block_tables
+                required_blocks = [
+                    (seq_len + self.page_size - 1) // self.page_size
+                    for seq_len in actual_seq_lengths_kv
+                ]
+                debug_key = (
+                    debug_bucket,
+                    fia_block_table.shape[1],
+                    max(required_blocks, default=0),
+                )
+                if max_kv_len >= 120 * 1024 and getattr(
+                    self, "_last_mtp_fia_debug_key", None
+                ) != debug_key:
+                    self._last_mtp_fia_debug_key = debug_key
+                    valid_blocks = fia_block_table[fia_block_table >= 0]
+                    block_min = (
+                        int(valid_blocks.min().item()) if valid_blocks.numel() else None
+                    )
+                    block_max = (
+                        int(valid_blocks.max().item()) if valid_blocks.numel() else None
+                    )
+                    kv_pool_num_blocks = k_cache.shape[0]
+                    insufficient_rows = [
+                        row
+                        for row, required in enumerate(required_blocks)
+                        if required > fia_block_table.shape[1]
+                    ]
+                    used_block_ranges = []
+                    invalid_used_block_count = 0
+                    for row, required in enumerate(required_blocks):
+                        used_blocks = fia_block_table[
+                            row, : min(required, fia_block_table.shape[1])
+                        ]
+                        if used_blocks.numel():
+                            used_block_ranges.append(
+                                (
+                                    int(used_blocks.min().item()),
+                                    int(used_blocks.max().item()),
+                                )
+                            )
+                            invalid_used_block_count += int(
+                                (
+                                    (used_blocks < 0)
+                                    | (used_blocks >= kv_pool_num_blocks)
+                                )
+                                .sum()
+                                .item()
+                            )
+                        else:
+                            used_block_ranges.append((None, None))
+                    logger.warning(
+                        "MTP FIA long-context debug: layer=%s, graph_mode=%s, "
+                        "query_shape=%s, k_cache_shape=%s, v_cache_shape=%s, "
+                        "block_table_shape=%s, block_range=[%s, %s], "
+                        "kv_pool_num_blocks=%s, used_block_ranges=%s, "
+                        "invalid_used_block_count=%s, "
+                        "page_size=%s, actual_seq_lengths=%s, "
+                        "actual_seq_lengths_kv=%s, required_blocks=%s, "
+                        "insufficient_rows=%s, num_token_non_padded=%s",
+                        layer.layer_id,
+                        self.graph_mode,
+                        tuple(query.shape),
+                        tuple(k_cache.shape),
+                        tuple(v_cache.shape),
+                        tuple(fia_block_table.shape),
+                        block_min,
+                        block_max,
+                        kv_pool_num_blocks,
+                        used_block_ranges,
+                        invalid_used_block_count,
+                        self.page_size,
+                        actual_seq_lengths,
+                        actual_seq_lengths_kv,
+                        required_blocks,
+                        insufficient_rows,
+                        forward_batch.num_token_non_padded_cpu,
+                    )
                 attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                     query,
                     k_cache,
