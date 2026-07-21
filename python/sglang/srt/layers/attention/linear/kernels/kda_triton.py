@@ -7,7 +7,44 @@ from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
 )
 from sglang.srt.utils import is_cpu, is_npu
 
-if not is_cpu():
+chunk_kda = None
+
+
+def _check_npu_kda_target_verify_kwargs(kwargs: dict) -> None:
+    if kwargs.pop("disable_state_update", False):
+        raise NotImplementedError(
+            "KDA target_verify on NPU requires an NPU kernel that can "
+            "write intermediate states without mutating the committed pool."
+        )
+    unsupported_kwargs = {
+        "intermediate_states_buffer",
+        "intermediate_state_indices",
+        "cache_steps",
+        "retrieve_parent_token",
+    }
+    if any(kwargs.pop(name, None) is not None for name in unsupported_kwargs):
+        raise NotImplementedError(
+            "KDA target_verify on NPU is not supported by "
+            "fused_sigmoid_gating_delta_rule_update_npu."
+        )
+
+
+if is_npu():
+    from sgl_kernel_npu.fla.fused_sigmoid_gating_recurrent import (
+        fused_sigmoid_gating_delta_rule_update_npu,
+    )
+
+    try:
+        from sgl_kernel_npu.fla.kda import chunk_kda_npu
+
+        chunk_kda = chunk_kda_npu
+    except ImportError:
+        chunk_kda = None
+
+    def fused_sigmoid_gating_delta_rule_update(**kwargs):
+        _check_npu_kda_target_verify_kwargs(kwargs)
+        return fused_sigmoid_gating_delta_rule_update_npu(**kwargs)
+elif not is_cpu():
     from sglang.kernels.ops.attention.fla.fused_recurrent import (
         fused_recurrent_kda_packed_decode,
     )
@@ -124,6 +161,9 @@ class TritonKDAKernel(LinearAttnKernelBase):
         query_start_loc: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        npu_kwargs = {}
+        if is_npu():
+            npu_kwargs["lower_bound"] = kwargs.get("lower_bound")
         return fused_sigmoid_gating_delta_rule_update(
             A_log=A_log,
             dt_bias=dt_bias,
@@ -139,6 +179,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
             softplus_beta=1.0,
             softplus_threshold=20.0,
             is_kda=True,
+            **npu_kwargs,
         )
 
     def target_verify(
@@ -205,6 +246,15 @@ class TritonKDAKernel(LinearAttnKernelBase):
         return_intermediate_states: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        if chunk_kda is None:
+            raise NotImplementedError(
+                "KDA prefill on NPU requires a chunk_kda_npu kernel. "
+                "Decode uses "
+                "sgl_kernel_npu.fla.fused_sigmoid_gating_delta_rule_update_npu; "
+                "target_verify still needs an NPU kernel with intermediate-state "
+                "support."
+            )
+
         return chunk_kda(
             q=q,
             k=k,
@@ -219,4 +269,5 @@ class TritonKDAKernel(LinearAttnKernelBase):
             dt_bias=dt_bias,
             lower_bound=lower_bound,
             output_intermediate_states=return_intermediate_states,
+            **kwargs,
         )

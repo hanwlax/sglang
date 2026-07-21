@@ -13,6 +13,7 @@
 # ==============================================================================
 """Config loading utilities."""
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -72,6 +73,26 @@ def _try_load_longcat_config(model, revision: Optional[str], **kwargs):
     )
 
 
+def _try_load_kimi_k3_config(model, revision: Optional[str], **kwargs):
+    config_file = kwargs.get("_configuration_file", "config.json")
+    local_config_path = Path(model)
+    if local_config_path.is_dir():
+        local_config_path = local_config_path / config_file
+    if local_config_path.is_file():
+        with open(local_config_path, encoding="utf-8") as f:
+            config_dict = json.load(f)
+    else:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model, revision=revision, **kwargs
+        )
+    if config_dict.get("model_type") != "kimi_k3":
+        return None
+
+    return _CONFIG_REGISTRY["kimi_k3"].from_pretrained(
+        model, revision=revision, **kwargs
+    )
+
+
 @register_model_config_parser("hf")
 class HfModelConfigParser(ModelConfigParserBase):
     def parse(
@@ -82,6 +103,10 @@ class HfModelConfigParser(ModelConfigParserBase):
         **kwargs,
     ):
         config = _try_load_longcat_config(model, revision, **kwargs)
+        kimi_k3_registry_config_loaded = False
+        if config is None:
+            config = _try_load_kimi_k3_config(model, revision, **kwargs)
+            kimi_k3_registry_config_loaded = config is not None
         if config is None:
             config = AutoConfig.from_pretrained(
                 model,
@@ -134,7 +159,10 @@ class HfModelConfigParser(ModelConfigParserBase):
             _set_architectures(config, "DeepseekOCRForCausalLM")
             config = DeepseekVLV2Config.from_pretrained(model, revision=revision)
             _apply_deepseek_ocr_overrides(config, model)
-        elif config.model_type in _CONFIG_REGISTRY:
+        elif (
+            config.model_type in _CONFIG_REGISTRY
+            and not kimi_k3_registry_config_loaded
+        ):
             model_type = config.model_type
             if model_type == "deepseek_vl_v2" and is_ocr:
                 model_type = "deepseek-ocr"

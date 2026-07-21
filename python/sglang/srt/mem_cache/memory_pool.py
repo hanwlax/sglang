@@ -3418,6 +3418,7 @@ class HybridLinearKVPool(KVCache):
                 device=device,
                 kv_lora_rank=kv_lora_rank,
                 qk_rope_head_dim=qk_rope_head_dim,
+                index_head_dim=None,
                 enable_memory_saver=enable_memory_saver,
             )
         self.full_attention_layer_id_mapping = {

@@ -14,14 +14,17 @@ from sglang.srt.layers.attention.linear.utils import (
     get_linear_attn_prefill_backend,
 )
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
+from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import is_cpu, is_cuda, is_npu
 from sglang.srt.utils.common import rank0_log
 
-# KDA always uses the triton causal_conv1d_fn (no CUDA override).
-# Only causal_conv1d_update needs platform-specific overrides for decode.
 if is_npu():
-    from sgl_kernel_npu.mamba.causal_conv1d import causal_conv1d_update_npu
+    from sgl_kernel_npu.mamba.causal_conv1d import (
+        causal_conv1d_fn_npu,
+        causal_conv1d_update_npu,
+    )
 
+    causal_conv1d_fn = causal_conv1d_fn_npu
     causal_conv1d_update = causal_conv1d_update_npu
 elif is_cpu():
     from sgl_kernel.mamba import causal_conv1d_update_cpu
@@ -30,6 +33,38 @@ elif is_cpu():
 
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
+
+
+def _split_kda_conv_states(
+    conv_states: torch.Tensor, splits: list[int]
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if conv_states.shape[-2] == sum(splits):
+        return conv_states.split(splits, dim=-2)
+
+    if conv_states.shape[-1] == sum(splits):
+        return tuple(x.transpose(-1, -2) for x in conv_states.split(splits, dim=-1))
+
+    if conv_states.shape[-3] == 3 and conv_states.shape[-2] == splits[0]:
+        return conv_states.unbind(dim=-3)
+
+    raise RuntimeError(
+        "Unexpected KDA conv state layout: "
+        f"shape={tuple(conv_states.shape)}, expected split dim {sum(splits)} "
+        f"or grouped [*, 3, {splits[0]}, *] / [*, 3, {sum(splits)}]"
+    )
+
+
+def _kda_conv_state_for_update(
+    conv_states: torch.Tensor, dim: int
+) -> torch.Tensor:
+    if conv_states.shape[-2] == dim:
+        return conv_states
+    if conv_states.shape[-1] == dim:
+        return conv_states.transpose(-1, -2)
+    raise RuntimeError(
+        "Unexpected KDA decode conv state layout: "
+        f"shape={tuple(conv_states.shape)}, expected dim {dim} on axis -2 or -1"
+    )
 
 
 class KDAKernelDispatcher:
@@ -321,7 +356,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
         qkv = causal_conv1d_update(
             mixed_qkv,
-            conv_states.transpose(-1, -2),
+            _kda_conv_state_for_update(conv_states, mixed_qkv.shape[-1]),
             layer.conv_weights,
             layer.bias,
             activation="silu",
@@ -351,6 +386,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 replayssm_g=replayssm_g,
                 replayssm_write_pos=replayssm_write_pos,
                 replayssm_force_flush=replayssm_force_flush,
+                lower_bound=getattr(layer, "lower_bound", None),
             )
             self._track_mamba_state_decode(
                 forward_batch, conv_states, ssm_states, cache_indices
@@ -373,6 +409,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             ssm_states=ssm_states,
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
+            lower_bound=getattr(layer, "lower_bound", None),
         )
 
         self._track_mamba_state_decode(
@@ -415,7 +452,9 @@ class KDAAttnBackend(MambaAttnBackendBase):
         q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights.split(
             splits, dim=0
         )
-        q_conv_state, k_conv_state, v_conv_state = conv_states.split(splits, dim=-2)
+        q_conv_state, k_conv_state, v_conv_state = _split_kda_conv_states(
+            conv_states, splits
+        )
         if layer.bias is not None:
             q_bias, k_bias, v_bias = layer.bias.split(splits, dim=0)
         else:
@@ -477,6 +516,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             # in place (e.g. FlashKDA) must not run for it.
             is_spec_decode=forward_batch.forward_mode.is_draft_extend_v2(),
             return_intermediate_states=track_ssm,
+            mamba_cache_chunk_size=get_server_args().mamba_cache_chunk_size,
         )
         if track_ssm:
             core_attn_out, h = core_attn_out

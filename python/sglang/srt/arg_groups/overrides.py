@@ -1110,6 +1110,7 @@ def _step3p_overrides(server_args: Any, hf_config: Any) -> dict:
 # guards in _handle_model_specific_adjustments.
 _MAMBA_RADIX_CACHE_ARCHS = frozenset(
     {
+        "KimiK3ForConditionalGeneration",
         "KimiLinearForCausalLM",
         "BailingMoeV2_5ForCausalLM",
         "Qwen3NextForCausalLM",
@@ -1132,6 +1133,7 @@ _MAMBA_RADIX_CACHE_ARCHS = frozenset(
 # delegates here.
 _MAMBA_EXTRA_BUFFER_ARCHS = frozenset(
     {
+        "KimiK3ForConditionalGeneration",
         "KimiLinearForCausalLM",
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",

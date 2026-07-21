@@ -47,6 +47,13 @@ MIMO_V2_MODEL_ARCHS = (
     "MiMoV2FlashForCausalLM",
 )
 MIMO_V2_MULTIMODAL_ARCHS = ("MiMoV2ForCausalLM",)
+MM_DISABLED_MODEL_ARCHS = (
+    "Gemma3ForConditionalGeneration",
+    "Llama4ForConditionalGeneration",
+    "Step3VLForConditionalGeneration",
+    "InklingForConditionalGeneration",
+    "KimiK3ForConditionalGeneration",
+)
 
 
 def get_mimo_v2_fused_qkv_expected_tp_size(hf_config):
@@ -306,14 +313,8 @@ class ModelConfig:
 
         # Set enable_multimodal
         if enable_multimodal is None:
-            mm_disabled_models = [
-                "Gemma3ForConditionalGeneration",
-                "Llama4ForConditionalGeneration",
-                "Step3VLForConditionalGeneration",
-                "InklingForConditionalGeneration",
-            ]
             if (
-                self.hf_config.architectures[0] in mm_disabled_models
+                self.hf_config.architectures[0] in MM_DISABLED_MODEL_ARCHS
                 and self.model_impl != ModelImpl.TRANSFORMERS
             ):
                 enable_multimodal = False
@@ -881,18 +882,11 @@ class ModelConfig:
             self.qk_rope_head_dim = self.hf_text_config.qk_rope_head_dim
             self.v_head_dim = self.hf_text_config.v_head_dim
             self.qk_nope_head_dim = self.hf_text_config.qk_nope_head_dim
-        elif "KimiLinearForCausalLM" in self.hf_config.architectures:
-            self.head_dim = 72
-            self.attention_arch = AttentionArch.MLA
-            self.kv_lora_rank = self.hf_config.kv_lora_rank
-            self.qk_rope_head_dim = self.hf_config.qk_rope_head_dim
-            self.v_head_dim = self.hf_config.v_head_dim
-            self.qk_nope_head_dim = self.hf_config.qk_nope_head_dim
-            self.scaling = 1 / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
-            if self.hf_config.rope_scaling:
-                self.scaling = compute_mla_mscale_scaling(
-                    self.hf_config.rope_scaling, self.scaling
-                )
+        elif (
+            "KimiLinearForCausalLM" in self.hf_config.architectures
+            or "KimiK3ForConditionalGeneration" in self.hf_config.architectures
+        ):
+            self._apply_kimi_linear_attention_config()
         elif (
             "BailingMoeV2_5ForCausalLM" in self.hf_config.architectures
             or "BailingMoeForCausalLMNextN" in self.hf_config.architectures
@@ -1069,6 +1063,20 @@ class ModelConfig:
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
         return self.hf_text_config.num_attention_heads
+
+    def _apply_kimi_linear_attention_config(self) -> None:
+        kimi_config = self.hf_text_config
+        self.head_dim = 72
+        self.attention_arch = AttentionArch.MLA
+        self.kv_lora_rank = kimi_config.kv_lora_rank
+        self.qk_rope_head_dim = kimi_config.qk_rope_head_dim
+        self.v_head_dim = kimi_config.v_head_dim
+        self.qk_nope_head_dim = kimi_config.qk_nope_head_dim
+        self.scaling = 1 / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
+        if kimi_config.rope_scaling:
+            self.scaling = compute_mla_mscale_scaling(
+                kimi_config.rope_scaling, self.scaling
+            )
 
     def get_num_kv_heads(self, tensor_parallel_size) -> int:
         """Returns the number of KV heads per GPU."""

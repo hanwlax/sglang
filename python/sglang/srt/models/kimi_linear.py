@@ -48,8 +48,10 @@ from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA as KimiMLAAtten
 from sglang.srt.models.llama import LlamaMLP as KimiMLP
 from sglang.srt.models.transformers import maybe_prefix
 from sglang.srt.runtime_context import get_parallel, get_stream
-from sglang.srt.utils import make_layers
+from sglang.srt.utils import is_npu, make_layers
 from sglang.srt.utils.common import BumpAllocator, add_prefix, set_weight_attrs
+
+_is_npu = is_npu()
 
 
 class KimiMoE(nn.Module):
@@ -328,6 +330,7 @@ class KimiDeltaAttention(nn.Module):
             A_log=self.A_log,
             dt_bias=self.dt_bias,
         )
+        self.attn.lower_bound = config.linear_attn_config.get("gate_lower_bound")
 
     def forward_qkvbfg(self, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
@@ -614,6 +617,22 @@ class KimiLinearModel(nn.Module):
 
 
 class KimiLinearForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "model": {
+            "gate_up_proj": ["gate_proj", "up_proj"],
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            "fused_qkvbfg_a_proj": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "b_proj",
+                "f_a_proj",
+                "g_a_proj",
+            ],
+            "fused_fg_b_proj": ["f_b_proj", "g_b_proj"],
+        }
+    }
+
     def __init__(
         self,
         config: KimiLinearConfig,
@@ -717,8 +736,12 @@ class KimiLinearForCausalLM(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
+                if (
+                    "mlp.experts." in name or "block_sparse_moe.experts." in name
+                ) and name not in params_dict:
                     continue
+                if _is_npu:
+                    name = name.replace("weight_packed", "weight")
                 # Check if this mapping targets a fused projection (only apply fusion check to fused params)
                 if param_name in {".fused_qkvbfg_a_proj", ".fused_fg_b_proj"}:
                     layer_id = int(name.split(".")[2])
@@ -743,11 +766,16 @@ class KimiLinearForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for idx, (param_name, weight_name, expert_id, shard_id) in enumerate(
-                    expert_params_mapping
-                ):
+                for (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    shard_id,
+                ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
+                    if _is_npu:
+                        name = name.replace("weight_packed", "weight")
                     name = name.replace(weight_name, param_name)
                     # if is_pp_missing_parameter(name, self):
                     #     continue
@@ -762,6 +790,8 @@ class KimiLinearForCausalLM(nn.Module):
                     )
                     break
                 else:
+                    if _is_npu:
+                        name = name.replace("weight_packed", "weight")
                     # Skip loading extra bias for GPTQ models.
                     if (
                         name.endswith(".bias")

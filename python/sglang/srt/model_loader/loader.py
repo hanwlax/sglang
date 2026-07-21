@@ -201,7 +201,10 @@ def _get_quantization_config(
 ) -> Optional[QuantizationConfig]:
     """Get the quantization config."""
     model_class, _ = get_model_architecture(model_config)
-    packed_modules_mapping = getattr(model_class, "packed_modules_mapping", {})
+    packed_modules_mapping = {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in getattr(model_class, "packed_modules_mapping", {}).items()
+    }
     remap_prefix = getattr(model_class, "remap_prefix", None)
     # TODO: we should remove this code and switch to the packed_modules_mapping declared inside the modeling files
     if model_config.quantization == "quark":
@@ -213,26 +216,31 @@ def _get_quantization_config(
         )
 
     if _is_npu:
-        packed_modules_mapping.update(
-            {
-                "visual": {
-                    "qkv_proj": ["qkv"],
-                    "gate_up_proj": ["gate_proj", "up_proj"],
-                },
-                "vision_model": {
-                    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-                    "proj": ["out_proj"],
-                },
-                "model": {
-                    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-                    "gate_up_proj": ["gate_proj", "up_proj"],
-                    "fused_qkv_a_proj_with_mqa": [
-                        "q_a_proj",
-                        "kv_a_proj_with_mqa",
-                    ],
-                },
-            }
-        )
+        npu_packed_modules_mapping = {
+            "visual": {
+                "qkv_proj": ["qkv"],
+                "gate_up_proj": ["gate_proj", "up_proj"],
+            },
+            "vision_model": {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+                "proj": ["out_proj"],
+            },
+            "model": {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+                "gate_up_proj": ["gate_proj", "up_proj"],
+                "fused_qkv_a_proj_with_mqa": [
+                    "q_a_proj",
+                    "kv_a_proj_with_mqa",
+                ],
+            },
+        }
+        for key, value in npu_packed_modules_mapping.items():
+            if isinstance(value, dict) and isinstance(
+                packed_modules_mapping.get(key), dict
+            ):
+                packed_modules_mapping[key].update(value)
+            else:
+                packed_modules_mapping[key] = value
 
     if model_config.quantization is not None:
         quant_config = get_quant_config(

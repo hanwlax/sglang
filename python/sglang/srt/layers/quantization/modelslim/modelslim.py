@@ -102,6 +102,7 @@ class ModelSlimConfig(QuantizationConfig):
                 for k, v in quant_config.items()
             }
 
+        quant_config = self._normalize_packed_weight_keys(quant_config)
         self.quant_description = quant_config
         ignore = cast(List[str], quant_config.get("ignore", []))
         self.ignore = ignore if ignore is not None else []
@@ -150,6 +151,70 @@ class ModelSlimConfig(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> ModelSlimConfig:
         return cls(config)
 
+    @staticmethod
+    def _normalize_packed_weight_keys(
+        quant_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized = dict(quant_config)
+        for key, value in quant_config.items():
+            if not isinstance(key, str) or not key.endswith(".weight_packed"):
+                continue
+            weight_key = key.removesuffix("_packed")
+            normalized.setdefault(weight_key, value)
+        return normalized
+
+    @staticmethod
+    def _prefix_candidates(prefix: str) -> tuple[str, ...]:
+        candidates = [prefix]
+        if prefix.startswith("language_model.model."):
+            suffix = prefix.removeprefix("language_model.model.")
+            candidates.extend(
+                [
+                    "language_model." + suffix,
+                    "model." + suffix,
+                    "model.language_model." + suffix,
+                    "model.language_model.model." + suffix,
+                ]
+            )
+        elif prefix.startswith("language_model."):
+            suffix = prefix.removeprefix("language_model.")
+            candidates.extend(
+                [
+                    suffix,
+                    "model." + suffix,
+                    "language_model.model." + suffix,
+                    "model.language_model." + suffix,
+                    "model.language_model.model." + suffix,
+                ]
+            )
+        elif prefix.startswith("model.language_model.model."):
+            suffix = prefix.removeprefix("model.language_model.model.")
+            candidates.extend(
+                [
+                    "language_model.model." + suffix,
+                    "language_model." + suffix,
+                    "model." + suffix,
+                    "model.language_model." + suffix,
+                ]
+            )
+        elif prefix.startswith("model.language_model."):
+            suffix = prefix.removeprefix("model.language_model.")
+            candidates.extend(
+                [
+                    "language_model." + suffix,
+                    "language_model.model." + suffix,
+                    "model." + suffix,
+                ]
+            )
+        for candidate in tuple(candidates):
+            candidates.extend(
+                [
+                    candidate.replace(".mlp.", ".block_sparse_moe.", 1),
+                    candidate.replace(".block_sparse_moe.", ".mlp.", 1),
+                ]
+            )
+        return tuple(dict.fromkeys(candidates))
+
     def get_quant_method(
         self,
         layer: torch.nn.Module,
@@ -159,7 +224,8 @@ class ModelSlimConfig(QuantizationConfig):
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 
         if isinstance(layer, LinearBase):
-            # TODO: we should remove this code and switch to the packed_modules_mapping declared inside the modeling files
+            # TODO: switch to the packed_modules_mapping declared inside
+            # the modeling files.
             key = "model"
             if "vision_model" in prefix:
                 key = "vision_model"
@@ -212,12 +278,21 @@ class ModelSlimConfig(QuantizationConfig):
             ("W4A4_MXFP4", ModelSlimMXFP4Scheme),
         ]
 
-        quant_schemes = [self.quant_description.get(prefix + ".weight", "")]
+        prefix_in_config = prefix
+        quant_schemes = []
+        for candidate in self._prefix_candidates(prefix):
+            scheme = self.quant_description.get(candidate + ".weight", "")
+            quant_schemes.append(scheme)
+            if scheme:
+                prefix_in_config = candidate
+                break
 
         for scheme_name, scheme_class in linear_quant_schemes:
             if any(s == scheme_name for s in quant_schemes):
                 logger.info_once(f"Using {scheme_class.__name__}")
-                return scheme_class(quant_config=self.quant_description, prefix=prefix)
+                return scheme_class(
+                    quant_config=self.quant_description, prefix=prefix_in_config
+                )
 
         logger.warning(
             f"Unsupported Linear modelslim scheme: "
@@ -235,20 +310,67 @@ class ModelSlimConfig(QuantizationConfig):
             ("W4A8_DYNAMIC", ModelSlimW4A8Int8MoE),
             ("W8A8_DYNAMIC", ModelSlimW8A8Int8MoE),
         ]
-        w13_keys = [
-            prefix + ".0.gate_proj.weight",
-            prefix + ".0.up_proj.weight",
+        prefix_in_config = None
+        w13_keys = []
+        w13_entries = {}
+        w2_key = ""
+        partial_match = None
+        for candidate in self._prefix_candidates(prefix):
+            candidate_w13_key_groups = [
+                [
+                    candidate + ".0.gate_proj.weight",
+                    candidate + ".0.up_proj.weight",
+                ],
+                [
+                    candidate + ".0.w1.weight",
+                    candidate + ".0.w3.weight",
+                ],
+            ]
+            candidate_w2_keys = [
+                candidate + ".0.down_proj.weight",
+                candidate + ".0.w2.weight",
+            ]
+            for cur_w13_keys in candidate_w13_key_groups:
+                cur_w13_entries = {
+                    key: self.quant_description[key]
+                    for key in cur_w13_keys
+                    if key in self.quant_description
+                }
+                for cur_w2_key in candidate_w2_keys:
+                    has_w2 = cur_w2_key in self.quant_description
+                    has_w13 = len(cur_w13_entries) == len(cur_w13_keys)
+                    if has_w13 and has_w2:
+                        prefix_in_config = candidate
+                        w13_keys = cur_w13_keys
+                        w13_entries = cur_w13_entries
+                        w2_key = cur_w2_key
+                        break
+                    if partial_match is None and (cur_w13_entries or has_w2):
+                        partial_match = (
+                            candidate,
+                            cur_w13_keys,
+                            cur_w13_entries,
+                            cur_w2_key,
+                        )
+                if prefix_in_config is not None:
+                    break
+            if prefix_in_config is not None:
+                break
+        if prefix_in_config is None and partial_match is not None:
+            prefix_in_config, w13_keys, w13_entries, w2_key = partial_match
+        if prefix_in_config is None:
+            w13_keys = [
+                prefix + ".0.gate_proj.weight",
+                prefix + ".0.up_proj.weight",
+            ]
+            w2_key = prefix + ".0.down_proj.weight"
+        missing_w13_keys = [
+            key for key in w13_keys if key not in self.quant_description
         ]
-        w2_key = prefix + ".0.down_proj.weight"
-        w13_entries = {
-            key: self.quant_description[key]
-            for key in w13_keys
-            if key in self.quant_description
-        }
-        if not w13_entries or w2_key not in self.quant_description:
+        if missing_w13_keys or w2_key not in self.quant_description:
             missing_groups = []
-            if not w13_entries:
-                missing_groups.append(f"W13 ({', '.join(w13_keys)})")
+            if missing_w13_keys:
+                missing_groups.append(f"W13 ({', '.join(missing_w13_keys)})")
             if w2_key not in self.quant_description:
                 missing_groups.append(f"W2 ({w2_key})")
             raise ValueError(
@@ -279,7 +401,7 @@ class ModelSlimConfig(QuantizationConfig):
             if cls is None:
                 logger.warning(f"Unsupported scheme '{name}' for layer {prefix}")
                 return None
-            return cls(self, weight_group)
+            return cls(self.quant_description, weight_group)
 
         w13_scheme = instantiate(w13_scheme_name, weight_group="w13")
         w2_scheme = instantiate(w2_name, weight_group="w2")
@@ -297,32 +419,35 @@ class ModelSlimConfig(QuantizationConfig):
         self, prefix: str, fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
     ):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
-        proj_name = prefix.split(".")[-1]
-        if proj_name in fused_mapping:
-            shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name)
-                for shard_proj_name in fused_mapping[proj_name]
-            ]
+        for candidate in self._prefix_candidates(prefix):
+            proj_name = candidate.split(".")[-1]
+            if proj_name in fused_mapping:
+                shard_prefixes = [
+                    candidate.replace(proj_name, shard_proj_name)
+                    for shard_proj_name in fused_mapping[proj_name]
+                ]
 
-            is_skipped = None
-            for shard_prefix in shard_prefixes:
-                is_shard_skipped = (
-                    self.quant_description.get(shard_prefix + ".weight", "") == "FLOAT"
-                )
-
-                if is_skipped is None:
-                    is_skipped = is_shard_skipped
-                elif is_shard_skipped != is_skipped:
-                    raise ValueError(
-                        f"Detected some but not all shards of {prefix} "
-                        "are quantized. All shards of fused layers "
-                        "to have the same precision."
+                is_skipped = None
+                for shard_prefix in shard_prefixes:
+                    is_shard_skipped = (
+                        self.quant_description.get(shard_prefix + ".weight", "")
+                        == "FLOAT"
                     )
-        else:
-            is_skipped = self.quant_description.get(prefix + ".weight", "") == "FLOAT"
 
-        assert is_skipped is not None
-        return is_skipped
+                    if is_skipped is None:
+                        is_skipped = is_shard_skipped
+                    elif is_shard_skipped != is_skipped:
+                        raise ValueError(
+                            f"Detected some but not all shards of {prefix} "
+                            "are quantized. All shards of fused layers "
+                            "to have the same precision."
+                        )
+                if is_skipped:
+                    return True
+            elif self.quant_description.get(candidate + ".weight", "") == "FLOAT":
+                return True
+
+        return False
 
     def get_scaled_act_names(self) -> List[str]:
         return []
