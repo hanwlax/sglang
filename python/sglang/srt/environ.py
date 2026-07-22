@@ -568,6 +568,10 @@ class Envs:
     # Quantize x to int8 in the dispatch operator
     DEEP_NORMAL_MODE_USE_INT8_QUANT = EnvBool(False) # This argument is deprecated
     SGLANG_NPU_FUSED_MOE_MODE = EnvInt(1)
+    SGLANG_NPU_PROFILING=EnvBool(False)
+    SGLANG_NPU_PROFILING_BS=EnvInt(1)
+    SGLANG_NPU_PROFILING_STEP=EnvInt(10)
+    SGLANG_NPU_PROFILING_STAGE=EnvStr("decode")
 
     # MTHREADS & MUSA
     SGLANG_MUSA_FA3_FORCE_UPDATE_METADATA = EnvBool(False)
