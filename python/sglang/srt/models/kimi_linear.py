@@ -44,12 +44,56 @@ from sglang.srt.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
     sharded_weight_loader,
 )
-from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA as KimiMLAAttention
+from sglang.srt.models.deepseek_v2 import DeepseekV2AttentionMLA
 from sglang.srt.models.llama import LlamaMLP as KimiMLP
 from sglang.srt.models.transformers import maybe_prefix
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import make_layers
-from sglang.srt.utils.common import BumpAllocator, add_prefix, set_weight_attrs
+from sglang.srt.utils.common import BumpAllocator, add_prefix, is_npu, set_weight_attrs
+
+_is_npu = is_npu()
+
+if _is_npu:
+    from sglang.srt.hardware_backend.npu.modules.deepseek_v2_attention_mla_npu import (
+        forward_dsa_core_npu,
+        forward_mha_core_npu,
+    )
+    from sglang.srt.models.deepseek_common.attention_forward_methods.forward_methods import (
+        AttnForwardMethod,
+    )
+
+
+class KimiMLAAttention(DeepseekV2AttentionMLA):
+    def forward_core(self, intermediate_state):
+        if not _is_npu:
+            return super().forward_core(intermediate_state)
+
+        hidden_states, attn_forward_method, forward_batch, inner_state = (
+            intermediate_state
+        )
+        if inner_state is None:
+            return hidden_states
+
+        if attn_forward_method == AttnForwardMethod.MHA:
+            return self.forward_normal_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MHA_CHUNKED_KV:
+            return self.forward_normal_chunked_kv_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MHA_ONE_SHOT:
+            return self.forward_normal_one_shot_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MLA:
+            return self.forward_absorb_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MLA_FUSED_ROPE_ROCM:
+            return self.forward_absorb_fused_mla_rope_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MLA_FUSED_ROPE_CPU:
+            return self.forward_absorb_fused_mla_rope_cpu_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MHA_NPU:
+            return forward_mha_core_npu(self, *inner_state)
+        elif attn_forward_method == AttnForwardMethod.MLA_NPU:
+            return self.forward_absorb_core(*inner_state, llama_4_scaling=None)
+        elif attn_forward_method == AttnForwardMethod.DSA_NPU:
+            return forward_dsa_core_npu(self, *inner_state)
+        else:
+            raise NotImplementedError
 
 
 class KimiMoE(nn.Module):
