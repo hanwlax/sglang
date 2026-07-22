@@ -2,7 +2,6 @@ from typing import Optional
 
 
 import torch
-import torch.nn.functional as F
 from sglang.srt.layers.attention.linear.kernels.kernel_backend import (
     LinearAttnKernelBase,
 )
@@ -21,105 +20,11 @@ if not is_cpu():
     from sglang.srt.layers.attention.fla.kda import chunk_kda
 
 if is_npu():
-    from sgl_kernel_npu.fla.fused_sigmoid_gating_recurrent import fused_sigmoid_gating_delta_rule_update_npu
+    from sgl_kernel_npu.fla.fused_sigmoid_gating_recurrent import (
+        fused_sigmoid_gating_delta_rule_update_npu,
+    )
+
     fused_sigmoid_gating_delta_rule_update = fused_sigmoid_gating_delta_rule_update_npu
-
-import os
-_KDA_USE_TORCH_NATIVE_EXTEND = os.getenv("SGLANG_KDA_TORCH_NATIVE_EXTEND", "0") == "1"
-
-def kda_extend_torch_native(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    *,
-    scale: float = None,
-    initial_state: torch.Tensor,
-    initial_state_indices: torch.Tensor,
-    A_log: torch.Tensor = None,
-    dt_bias: torch.Tensor = None,
-    use_qk_l2norm_in_kernel: bool = True,
-    cu_seqlens: torch.Tensor = None,
-) -> torch.Tensor:
-    """Torch-native KDA prefill (sequential recurrence).
-
-    Replaces ``chunk_kda`` / ``fused_recurrent_kda`` with a pure PyTorch
-    per-token loop.  Correctness reference on Ascend where the Triton
-    JIT may produce zero-valued or silently incorrect results.
-    """
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-
-    B = q.shape[0]
-    T = q.shape[1]
-    H = q.shape[2]
-    K_dim = q.shape[3]
-    HV = v.shape[2]
-    V_dim = v.shape[3]
-
-    out_dtype = v.dtype
-    q = q.float()
-    k = k.float()
-    v = v.float()
-    beta = beta.float()
-    A_log = A_log.float().view(1, 1, -1, 1)
-    dt_bias = dt_bias.float().view(1, 1, -1, K_dim)
-
-    if use_qk_l2norm_in_kernel:
-        q = q / (q.norm(p=2, dim=-1, keepdim=True) + 1e-6)
-        k = k / (k.norm(p=2, dim=-1, keepdim=True) + 1e-6)
-    q = q * scale
-
-    # Activate gate: g_act = -exp(A_log) * softplus(g + dt_bias)
-    gate_x = g.float() + dt_bias
-    gate_act = -torch.exp(A_log) * F.softplus(gate_x, beta=1.0, threshold=20.0)
-    gate_exp = torch.exp(gate_act)  # [1, T, H, K]
-
-    ssm_pool = initial_state
-    out = torch.empty(B, T, HV, V_dim, device=q.device, dtype=q.dtype)
-
-    if cu_seqlens is not None and cu_seqlens.shape[0] > 2:
-        seq_starts = cu_seqlens[:-1]
-    else:
-        seq_starts = torch.tensor([0], dtype=torch.long, device=cu_seqlens.device if cu_seqlens is not None else "cpu")
-
-    for seq_i, start in enumerate(seq_starts):
-        if cu_seqlens is not None:
-            end = cu_seqlens[seq_i + 1]
-        else:
-            end = B * T
-
-        idx = initial_state_indices[seq_i].item()
-        if idx >= 0:
-            state = ssm_pool[idx].float()  # [HV, V, K]
-        else:
-            state = torch.zeros(HV, V_dim, K_dim, device=q.device)
-
-        gqa_ratio = HV // H
-        for t in range(start, end):
-            qt = q[0, t]  # [H, K]
-            kt = k[0, t]  # [H, K]
-            vt = v[0, t]  # [HV, V]
-            ge = gate_exp[0, t]  # [H, K]
-            bt = beta[0, t]  # [HV]
-
-            if gqa_ratio > 1:
-                kt = kt.repeat_interleave(gqa_ratio, dim=0)
-                qt = qt.repeat_interleave(gqa_ratio, dim=0)
-                ge = ge.repeat_interleave(gqa_ratio, dim=0)
-
-            state = state * ge.unsqueeze(1)
-            v_upd = vt - (state @ kt.unsqueeze(-1)).squeeze(-1)
-            v_upd = v_upd * bt.unsqueeze(-1)
-            state = state + v_upd.unsqueeze(-1) * kt.unsqueeze(1)
-            ot = (state @ qt.unsqueeze(-1)).squeeze(-1)
-            out[0, t] = ot.to(out.dtype)
-
-        if idx >= 0:
-            ssm_pool[idx] = state.to(ssm_pool.dtype)
-
-    return out.to(out_dtype)
 
 
 class TritonKDAKernel(LinearAttnKernelBase):
@@ -259,17 +164,6 @@ class TritonKDAKernel(LinearAttnKernelBase):
         lower_bound: Optional[float] = None,
         **kwargs,
     ) -> torch.Tensor:
-        if _KDA_USE_TORCH_NATIVE_EXTEND and A_log is not None:
-            return kda_extend_torch_native(
-                q=q, k=k, v=v, g=g, beta=beta,
-                scale=None,
-                initial_state=ssm_states,
-                initial_state_indices=cache_indices,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=query_start_loc,
-            )
         return chunk_kda(
             q=q,
             k=k,
@@ -283,4 +177,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
             A_log=A_log,
             dt_bias=dt_bias,
             lower_bound=lower_bound,
+            output_intermediate_states=kwargs.get(
+                "return_intermediate_states", False
+            ),
         )

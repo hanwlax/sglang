@@ -198,6 +198,9 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
+        self.conv_states_shape = self._channel_first_conv_states(
+            model_runner.req_to_token_pool.mamba_pool.mamba_cache.conv[0]
+        ).shape
         decode_backend = get_linear_attn_decode_backend()
         prefill_backend = get_linear_attn_prefill_backend()
         self.kernel_dispatcher = KDAKernelDispatcher(decode_backend, prefill_backend)
@@ -212,9 +215,22 @@ class KDAAttnBackend(MambaAttnBackendBase):
         """
         return conv_states if is_npu() else conv_states.transpose(-1, -2)
 
+    def init_forward_metadata(self, forward_batch: ForwardBatch):
+        super().init_forward_metadata(forward_batch)
+        if self.forward_metadata.has_mamba_track_mask:
+            self.forward_metadata.mamba_track_mask_indices = (
+                forward_batch.mamba_track_mask.nonzero(as_tuple=True)[0]
+            )
+            self.forward_metadata.conv_states_mask_indices = (
+                forward_batch.mamba_track_indices[
+                    self.forward_metadata.mamba_track_mask_indices
+                ]
+            )
+
     def forward_decode(
         self,
         layer: RadixLinearAttention,
+        forward_batch: ForwardBatch,
         mixed_qkv: Union[torch.Tensor, Tuple[torch.Tensor, ...]],
         a: torch.Tensor,
         b: torch.Tensor,
@@ -249,27 +265,71 @@ class KDAAttnBackend(MambaAttnBackendBase):
         replayssm_g = layer_cache.replayssm_g
 
         conv_states = self._channel_first_conv_states(conv_states)
-        if is_npu():
-            qkv, updated_conv_states = torch_causal_conv1d_update_npu(
-                mixed_qkv.unsqueeze(-1),
-                conv_states[cache_indices],
-                layer.conv_weights,
-                bias=layer.bias,
-                activation="silu",
+        if isinstance(layer.conv_weights, tuple):
+            splits = [layer.q_dim, layer.k_dim, layer.v_dim]
+            q_in, k_in, v_in = mixed_qkv.split(splits, dim=-1)
+            q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights
+            q_conv_state, k_conv_state, v_conv_state = conv_states.split(
+                splits, dim=-2
             )
-            conv_states.index_copy_(
-                0, cache_indices, updated_conv_states.to(conv_states.dtype)
+            if layer.bias is not None:
+                q_bias, k_bias, v_bias = layer.bias
+            else:
+                q_bias, k_bias, v_bias = None, None, None
+
+            def run_update(x, state, weight, bias):
+                if is_npu():
+                    out, updated_state = torch_causal_conv1d_update_npu(
+                        x.unsqueeze(-1),
+                        state[cache_indices],
+                        weight,
+                        bias=bias,
+                        activation="silu",
+                    )
+                    state.index_copy_(
+                        0, cache_indices, updated_state.to(state.dtype)
+                    )
+                    return out.squeeze(-1)
+
+                return causal_conv1d_update(
+                    x,
+                    state,
+                    weight,
+                    bias,
+                    activation="silu",
+                    conv_state_indices=cache_indices,
+                )
+
+            qkv = torch.cat(
+                [
+                    run_update(q_in, q_conv_state, q_conv_weight, q_bias),
+                    run_update(k_in, k_conv_state, k_conv_weight, k_bias),
+                    run_update(v_in, v_conv_state, v_conv_weight, v_bias),
+                ],
+                dim=-1,
             )
-            qkv = qkv.squeeze(-1)
         else:
-            qkv = causal_conv1d_update(
-                mixed_qkv,
-                conv_states,
-                layer.conv_weights,
-                layer.bias,
-                activation="silu",
-                conv_state_indices=cache_indices,
-            )
+            if is_npu():
+                qkv, updated_conv_states = torch_causal_conv1d_update_npu(
+                    mixed_qkv.unsqueeze(-1),
+                    conv_states[cache_indices],
+                    layer.conv_weights,
+                    bias=layer.bias,
+                    activation="silu",
+                )
+                conv_states.index_copy_(
+                    0, cache_indices, updated_conv_states.to(conv_states.dtype)
+                )
+                qkv = qkv.squeeze(-1)
+            else:
+                qkv = causal_conv1d_update(
+                    mixed_qkv,
+                    conv_states,
+                    layer.conv_weights,
+                    layer.bias,
+                    activation="silu",
+                    conv_state_indices=cache_indices,
+                )
 
         # Skip split + reshape by consuming the packed mixed_qkv directly in a
         # single fused Triton kernel (KDA per-K gate variant of GDN PR #20627).
@@ -286,7 +346,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 "KDA packed decode requires one token per sequence (T=1): "
                 f"got {qkv.shape[0]} tokens for {cache_indices.shape[0]} requests."
             )
-            return self.kernel_dispatcher.packed_decode(
+            core_attn_out = self.kernel_dispatcher.packed_decode(
                 mixed_qkv=qkv,
                 a=a,
                 b=b,
@@ -303,13 +363,17 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 replayssm_write_pos=replayssm_write_pos,
                 replayssm_force_flush=replayssm_force_flush,
             )
+            self._track_mamba_state_decode(
+                forward_batch, conv_states, ssm_states, cache_indices
+            )
+            return core_attn_out
 
         q, k, v = qkv.split([layer.q_dim, layer.k_dim, layer.v_dim], dim=-1)
         q = q.unflatten(-1, (-1, layer.head_q_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
-        return self.kernel_dispatcher.decode(
+        core_attn_out = self.kernel_dispatcher.decode(
             q=q,
             k=k,
             v=v,
@@ -321,6 +385,10 @@ class KDAAttnBackend(MambaAttnBackendBase):
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
         )
+        self._track_mamba_state_decode(
+            forward_batch, conv_states, ssm_states, cache_indices
+        )
+        return core_attn_out
 
     def forward_extend(
         self,
@@ -341,13 +409,26 @@ class KDAAttnBackend(MambaAttnBackendBase):
 
         has_initial_state = forward_batch.extend_prefix_lens > 0
 
+        if self.forward_metadata.has_mamba_track_mask:
+            conv_window = mixed_qkv[self.forward_metadata.track_conv_indices]
+            if is_npu():
+                conv_window = conv_window.transpose(-1, -2)
+            mamba_cache_params.conv[0][
+                self.forward_metadata.conv_states_mask_indices
+            ] = conv_window
+
         splits = [layer.q_dim, layer.k_dim, layer.v_dim]
         q, k, v = mixed_qkv.transpose(0, 1).split(splits, dim=0)
-        q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights.split(
-            splits, dim=0
-        )
+        if isinstance(layer.conv_weights, tuple):
+            q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights
+        else:
+            q_conv_weight, k_conv_weight, v_conv_weight = layer.conv_weights.split(
+                splits, dim=0
+            )
         q_conv_state, k_conv_state, v_conv_state = conv_states.split(splits, dim=-2)
-        if layer.bias is not None:
+        if isinstance(layer.bias, tuple):
+            q_bias, k_bias, v_bias = layer.bias
+        elif layer.bias is not None:
             q_bias, k_bias, v_bias = layer.bias.split(splits, dim=0)
         else:
             q_bias, k_bias, v_bias = None, None, None
@@ -418,6 +499,13 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend_v2()
             ),
+            return_intermediate_states=self.forward_metadata.has_mamba_track_mask,
         )
+
+        if self.forward_metadata.has_mamba_track_mask:
+            core_attn_out, h = core_attn_out
+            self._track_mamba_state_extend(
+                forward_batch, h, ssm_states, self.forward_metadata
+            )
 
         return core_attn_out

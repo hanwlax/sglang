@@ -20,7 +20,6 @@ from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelBatchedLinear,
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
     MergedColumnParallelRepeatedLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -327,18 +326,34 @@ class KimiDeltaAttention(nn.Module):
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
-        self.qkv_conv1d = MergedColumnParallelLinear(
+        self.q_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
-            output_sizes=[projection_size, projection_size, projection_size],
+            output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
-            prefix=f"{prefix}.qkv_conv1d",
+            prefix=f"{prefix}.q_conv1d",
+        )
+        self.k_conv1d = ColumnParallelLinear(
+            input_size=self.conv_size,
+            output_size=projection_size,
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.k_conv1d",
+        )
+        self.v_conv1d = ColumnParallelLinear(
+            input_size=self.conv_size,
+            output_size=projection_size,
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.v_conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
         # `ColumnParallelLinear` and `set_weight_attrs`
         # doesn't allow to override it
-        self.qkv_conv1d.weight.data = self.qkv_conv1d.weight.data.unsqueeze(1)
+        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
+        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
+        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -356,8 +371,22 @@ class KimiDeltaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        conv_weights = self.qkv_conv1d.weight.squeeze(1)
-        bias = self.qkv_conv1d.bias
+        self.q_conv_weights = self.q_conv1d.weight.view(
+            self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
+        )
+        self.k_conv_weights = self.k_conv1d.weight.view(
+            self.k_conv1d.weight.size(0), self.k_conv1d.weight.size(2)
+        )
+        self.v_conv_weights = self.v_conv1d.weight.view(
+            self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
+        )
+
+        conv_weights = (
+            self.q_conv_weights,
+            self.k_conv_weights,
+            self.v_conv_weights,
+        )
+        bias = (self.q_conv1d.bias, self.k_conv1d.bias, self.v_conv1d.bias)
 
         self.attn = RadixLinearAttention(
             layer_id=self.layer_idx,
@@ -724,10 +753,6 @@ class KimiLinearForCausalLM(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            # qkv conv fuse
-            (".qkv_conv1d", ".q_conv1d", 0),
-            (".qkv_conv1d", ".k_conv1d", 1),
-            (".qkv_conv1d", ".v_conv1d", 2),
         ]
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales

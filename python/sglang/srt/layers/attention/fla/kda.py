@@ -28,6 +28,7 @@ from sglang.srt.layers.attention.fla.utils import (
     check_shared_mem,
     is_intel,
 )
+from sglang.srt.utils import is_npu
 
 if is_intel:
     from sglang.srt.hardware_backend.xpu.kernels.fla.chunk_delta_h import (
@@ -36,6 +37,88 @@ if is_intel:
 
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
+
+
+def _kda_native_recurrent_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    initial_state_indices: torch.Tensor,
+    cu_seqlens: Optional[torch.LongTensor],
+    A_log: Optional[torch.Tensor],
+    dt_bias: Optional[torch.Tensor],
+    lower_bound: Optional[float],
+):
+    """Torch-native KDA prefill fallback for NPU.
+
+    The Triton chunk intra kernels can hang on NPU for short varlen prefill.
+    This path keeps the KDA recurrence in native torch ops. The NPU recurrent
+    decode kernel consumes the cache storage directly as [slot, H, K, V]. Kimi
+    currently has K == V, so transposing the matrix does not change its shape
+    but does corrupt the state seen by the first decode token.
+    """
+
+    assert q.shape[0] == 1, "KDA native NPU fallback expects flattened varlen batch"
+    _, total_len, num_heads, head_k_dim = q.shape
+    head_v_dim = v.shape[-1]
+    out = torch.empty(
+        (1, total_len, num_heads, head_v_dim),
+        device=q.device,
+        dtype=v.dtype,
+    )
+
+    if cu_seqlens is None:
+        seq_ranges = [(0, total_len)]
+    else:
+        cu_seqlens_cpu = cu_seqlens.detach().cpu().tolist()
+        seq_ranges = list(zip(cu_seqlens_cpu[:-1], cu_seqlens_cpu[1:]))
+
+    A = None if A_log is None else torch.exp(A_log.reshape(num_heads, 1).float())
+    dt = None if dt_bias is None else dt_bias.reshape(num_heads, head_k_dim).float()
+
+    for seq_idx, (start, end) in enumerate(seq_ranges):
+        state_idx = int(initial_state_indices[seq_idx].detach().cpu().item())
+        if state_idx >= 0:
+            state = initial_state[state_idx].float()
+        else:
+            state = torch.zeros(
+                (num_heads, head_k_dim, head_v_dim),
+                device=q.device,
+                dtype=torch.float32,
+            )
+
+        for token_idx in range(start, end):
+            q_t = q[0, token_idx].float()
+            k_t = k[0, token_idx].float()
+            v_t = v[0, token_idx].float()
+            beta_t = beta[0, token_idx].float()
+
+            if A is not None:
+                gate_x = g[0, token_idx].float()
+                if dt is not None:
+                    gate_x = gate_x + dt
+                if lower_bound is not None:
+                    gate = lower_bound * torch.sigmoid(A * gate_x)
+                else:
+                    gate = -A * torch.nn.functional.softplus(gate_x)
+            else:
+                gate = g[0, token_idx].float()
+
+            state = state * torch.exp(gate).unsqueeze(-1)
+            state_k = torch.einsum("hkv,hk->hv", state, k_t)
+            delta = (v_t - state_k) * beta_t.unsqueeze(-1)
+            state = state + k_t.unsqueeze(-1) * delta.unsqueeze(-2)
+            out_t = torch.einsum("hkv,hk->hv", state, q_t) * scale
+            out[0, token_idx] = out_t.to(out.dtype)
+
+        if state_idx >= 0:
+            initial_state[state_idx].copy_(state.to(initial_state.dtype))
+
+    return out
 
 
 def cdiv(a: int, b: int) -> int:
@@ -1042,6 +1125,7 @@ def chunk_kda_fwd(
     A_log: Optional[torch.Tensor] = None,
     dt_bias: Optional[torch.Tensor] = None,
     lower_bound: Optional[float] = None,
+    output_intermediate_states: bool = False,
 ):
     chunk_size = 64
     # Pre-compute chunk indices once and thread through all downstream kernels.
@@ -1128,8 +1212,11 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
-    del Aqk, v_new, h
+    del Aqk, v_new
 
+    if output_intermediate_states:
+        return o, h
+    del h
     return o
 
 
@@ -1147,6 +1234,7 @@ def chunk_kda(
     A_log: Optional[torch.Tensor] = None,
     dt_bias: Optional[torch.Tensor] = None,
     lower_bound: Optional[float] = None,
+    output_intermediate_states: bool = False,
     **kwargs,
 ):
     if scale is None:
@@ -1156,7 +1244,23 @@ def chunk_kda(
         q = l2norm_fwd(q.contiguous())
         k = l2norm_fwd(k.contiguous())
 
-    o = chunk_kda_fwd(
+    if is_npu() and not output_intermediate_states:
+        return _kda_native_recurrent_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            initial_state_indices=initial_state_indices,
+            cu_seqlens=cu_seqlens,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+        )
+
+    return chunk_kda_fwd(
         q=q,
         k=k,
         v=v.contiguous(),
@@ -1169,5 +1273,5 @@ def chunk_kda(
         A_log=A_log,
         dt_bias=dt_bias,
         lower_bound=lower_bound,
+        output_intermediate_states=output_intermediate_states,
     )
-    return o
