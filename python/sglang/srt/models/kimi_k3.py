@@ -235,7 +235,9 @@ class KimiMoE(nn.Module):
         self.routed_expert_hidden_size = getattr(
             config, "routed_expert_hidden_size", None
         )
-        if self.routed_expert_hidden_size is not None:
+        self.use_latent_moe = self.routed_expert_hidden_size is not None
+        self.latent_moe_use_norm = getattr(config, "latent_moe_use_norm", False)
+        if self.use_latent_moe:
             self.routed_expert_down_proj = ReplicatedLinear(
                 config.hidden_size,
                 self.routed_expert_hidden_size,
@@ -250,9 +252,10 @@ class KimiMoE(nn.Module):
                 quant_config=quant_config,
                 prefix=add_prefix("routed_expert_up_proj", prefix),
             )
-            self.routed_expert_norm = RMSNorm(
-                self.routed_expert_hidden_size, eps=config.rms_norm_eps
-            )
+            if self.latent_moe_use_norm:
+                self.routed_expert_norm = RMSNorm(
+                    self.routed_expert_hidden_size, eps=config.rms_norm_eps
+                )
 
         self.topk = TopK(
             top_k=config.num_experts_per_token,
@@ -290,7 +293,7 @@ class KimiMoE(nn.Module):
 
         shared_output = None
         routed_hidden_states = hidden_states
-        if self.routed_expert_hidden_size is not None:
+        if self.use_latent_moe:
             routed_hidden_states = self.routed_expert_down_proj(hidden_states)[0]
 
         if (
@@ -317,8 +320,9 @@ class KimiMoE(nn.Module):
             topk_output = self.topk(hidden_states, router_logits)
             final_hidden_states = self.experts(routed_hidden_states, topk_output)
 
-        if self.routed_expert_hidden_size is not None:
-            final_hidden_states = self.routed_expert_norm(final_hidden_states)
+        if self.use_latent_moe:
+            if self.latent_moe_use_norm:
+                final_hidden_states = self.routed_expert_norm(final_hidden_states)
             final_hidden_states = self.routed_expert_up_proj(final_hidden_states)[0]
 
         if shared_output is not None:
@@ -783,7 +787,10 @@ class KimiDecoderLayer(nn.Module):
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        prefix_sum = prefix_sum + hidden_states
+        if prefix_sum is None:
+            prefix_sum = hidden_states
+        else:
+            prefix_sum = prefix_sum + hidden_states
         return prefix_sum, block_residual
 
 
@@ -843,11 +850,11 @@ class KimiLinearModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.use_attn_residuals = (
+            getattr(config, "attn_res_block_size", None) is not None
+        )
         if self.pp_group.is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.use_attn_residuals = (
-                getattr(config, "attn_res_block_size", None) is not None
-            )
             if self.use_attn_residuals:
                 self.output_attn_res_norm = RMSNorm(
                     config.hidden_size, eps=config.rms_norm_eps
@@ -861,7 +868,6 @@ class KimiLinearModel(nn.Module):
                 )
         else:
             self.norm = PPMissingLayer()
-            self.use_attn_residuals = False
 
         world_size = get_parallel().tp_size
         assert (
