@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from sglang.srt.distributed import get_tp_group
+from sglang.srt.distributed import get_moe_ep_group
 from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.utils import FusedMoEMode, npu_format_cast
 from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPBuffer
@@ -29,7 +29,7 @@ _PARAMS_BYTES = 2  # bf16 — Ascend's Dispatch & Combine does not support fp16
 def _get_fuseep_buffer(layer: FusedMoE):
     DeepEPBuffer.set_dispatch_mode_as_low_latency()
     return DeepEPBuffer.get_deepep_buffer(
-        get_tp_group().device_group,
+        get_moe_ep_group().device_group,
         layer.hidden_size,
         _PARAMS_BYTES,
         DeepEPMode.LOW_LATENCY,
@@ -43,22 +43,71 @@ def forward_fuseep(
     hidden_states: torch.Tensor,
     topk_output: TopKOutput,
 ) -> torch.Tensor:
-    buf = _get_fuseep_buffer(layer)
-    hidden_states, _ = buf.fused_deep_moe(
-        hidden_states,
-        topk_idx=topk_output.topk_ids,
-        topk_weights=topk_output.topk_weights,
-        gmm1_permuted_weight=layer.w13_weight,
-        gmm1_permuted_weight_scale=layer.w13_weight_scale,
-        gmm2_weight=layer.w2_weight,
-        gmm2_weight_scale=layer.w2_weight_scale,
-        num_max_dispatch_tokens_per_rank=(
-            envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
-        ),
-        num_experts=layer.num_experts,
-        fuse_mode=envs.SGLANG_NPU_FUSED_MOE_MODE.get(),
-    )
-    return hidden_states
+    fuse_mode = envs.SGLANG_NPU_FUSED_MOE_MODE.get()
+    if fuse_mode == FusedMoEMode.MEGA_MOE.value:
+        # print(f"xxxxx",flush=True)
+        # assert layer.weights.w1_scale is not None
+        # assert layer.weights.w2_scale is not None
+
+        def to_list(x):
+            return x if isinstance(x, list) else [x]
+
+        weight1 = to_list(layer.w13_weight)
+        weight2 = to_list(layer.w2_weight)
+
+        weight_scales1 = to_list(layer.w13_weight_scale)
+        weight_scales2 = to_list(layer.w2_weight_scale)
+
+        weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
+        weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
+
+        # l1_bias = layer.w13_weight_scale
+        # l2_bias = layer.w13_weight_scale
+        # deepep
+        # import deepep.bufferf
+        buf = _get_fuseep_buffer(layer)
+        # print(f"================= {weight1.shape=} {weight1.dtype=}", flush=True)
+        out, _ = buf.fused_deep_moe(
+            x=hidden_states,
+            topk_idx=topk_output.topk_ids.to(torch.int32),
+            topk_weights=topk_output.topk_weights.to(torch.float32),
+            gmm1_permuted_weight=weight1,
+            gmm1_permuted_weight_scale=weight_scales1,
+            gmm2_weight=weight2,
+            gmm2_weight_scale=weight_scales2,
+            num_max_dispatch_tokens_per_rank=(
+                envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
+            ),
+            backend="mega_moe",
+            activation="situ",
+            beta=4.0,
+            linear_beta=25.0,
+            l1_bias=layer.w13_scale_bias,
+            l2_bias=layer.w2_scale_bias,
+            num_experts=layer.num_experts,
+            # x_active_mask=x_active_mask,
+            # activation_clamp=activation_clamp,
+            # weight1_type=layer._mega_moe_weight_type,
+            # weight2_type=layer._mega_moe_weight_type,
+        )
+        return out
+    else:
+        buf = _get_fuseep_buffer(layer)
+        hidden_states, _ = buf.fused_deep_moe(
+            hidden_states,
+            topk_idx=topk_output.topk_ids,
+            topk_weights=topk_output.topk_weights,
+            gmm1_permuted_weight=layer.w13_weight,
+            gmm1_permuted_weight_scale=layer.w13_weight_scale,
+            gmm2_weight=layer.w2_weight,
+            gmm2_weight_scale=layer.w2_weight_scale,
+            num_max_dispatch_tokens_per_rank=(
+                envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
+            ),
+            num_experts=layer.num_experts,
+            fuse_mode=fuse_mode,
+        )
+        return hidden_states
 
 
 def _permute_w13_weight_scale(w: torch.Tensor, tile_n: int) -> torch.Tensor:
@@ -127,7 +176,8 @@ def process_fuseep_weights(layer: torch.nn.Module) -> None:
     fused_deep_moe op. Invoked from NPU ``process_weights_after_loading``
     when ``--moe-a2a-backend ascend_fuseep`` is set.
     """
-    if envs.SGLANG_NPU_FUSED_MOE_MODE.get() == FusedMoEMode.DISPATCH_FFN_COMBINE.value:
+    sglang_npu_fused_moe_mode = envs.SGLANG_NPU_FUSED_MOE_MODE.get()
+    if sglang_npu_fused_moe_mode == FusedMoEMode.DISPATCH_FFN_COMBINE.value:
         w13_weight = _release_weight_cache(layer.w13_weight)
         layer.w13_weight.data = npu_format_cast(w13_weight)
         w2_weight = _release_weight_cache(layer.w2_weight)
@@ -143,7 +193,7 @@ def process_fuseep_weights(layer: torch.nn.Module) -> None:
 
         layer.w13_weight_scale = _scale_from_float_to_int64(layer.w13_weight_scale.data)
         layer.w2_weight_scale = _scale_from_float_to_int64(layer.w2_weight_scale.data)
-    else:
+    elif sglang_npu_fused_moe_mode == FusedMoEMode.FUSED_DEEP_MOE.value:
         cpu_w13 = layer.w13_weight.data.transpose(1, 2).cpu()
         layer.w13_weight.data = _reshape_w13_weight(cpu_w13, -1).npu()
         w13_scale = layer.w13_weight_scale.data.squeeze(-1).contiguous()
@@ -158,6 +208,39 @@ def process_fuseep_weights(layer: torch.nn.Module) -> None:
         layer.w2_weight_scale = torch.nn.Parameter(
             w2_scale.to(torch.float32), requires_grad=False
         )
+    else:
+        # print(f"=================209 ======= ", flush=True)
+        layer.w13_weight.data = npu_format_cast(layer.w13_weight.data)
+        layer.w2_weight.data = npu_format_cast(layer.w2_weight.data)
+        layer.cann_mega_moe_w13_weight_list = [weight.clone().view(torch.int32) for weight in layer.w13_weight.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_weight_list = [weight.clone().view(torch.int32) for weight in layer.w2_weight.data.unbind(dim=0)]
+
+        layer.cann_mega_moe_w13_weight_scale_list = [t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
+        if not hasattr(layer, "w13_scale_bias"):
+            raise RuntimeError(
+                "MegaMoe only support W4A8 INT on A2/A3 for weight with w1 scale bias and w2 scale bias."
+                "Try to disable MegaMoe to avoid this error."
+            )
+        layer.cann_mega_moe_w13_scale_bias_list = [t.reshape(-1) for t in layer.w13_scale_bias.data.unbind(dim=0)]
+        layer.cann_mega_moe_w2_scale_bias_list = [t.reshape(-1) for t in layer.w2_scale_bias.data.unbind(dim=0)]
+        del layer.w13_weight
+        del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
+        del layer.w13_scale_bias
+        del layer.w2_scale_bias
+        layer.w13_weight = layer.cann_mega_moe_w13_weight_list
+        layer.w13_weight_scale = layer.cann_mega_moe_w13_weight_scale_list
+        layer.w2_weight = layer.cann_mega_moe_w2_weight_list
+        layer.w2_weight_scale = layer.cann_mega_moe_w2_weight_scale_list
+
+        def cast_bias_to_fp32(bias):
+            lst = bias if isinstance(bias, list) else [bias]
+            return [t if t.dtype == torch.float32 else t.to(torch.float32) for t in lst]
+
+        layer.w13_scale_bias = cast_bias_to_fp32(layer.cann_mega_moe_w13_scale_bias_list)
+        layer.w2_scale_bias = cast_bias_to_fp32(layer.cann_mega_moe_w2_scale_bias_list)
 
     if hasattr(layer, "w13_weight_offset"):
         layer.w13_weight_offset = torch.nn.Parameter(

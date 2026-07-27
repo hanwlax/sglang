@@ -815,6 +815,17 @@ class NPUW4A8Int8DynamicMoEMethod(_NPUFusedMoEMethodBase):
         ), "the last dim of weight needs to be divided by 4"
         return weight.view(torch.int32).contiguous()
 
+    # def pack_int4_to_int8(self, weight: torch.Tensor) -> torch.Tensor:
+    #     shape = weight.shape
+    #     weight = weight.reshape(-1, 2)
+    #     weight0 = weight[:, :1]
+    #     weight1 = weight[:, 1:]
+    #     weight1_4 = torch.bitwise_left_shift(weight1, 4)
+    #     weight2_4 = weight0 & 0b00001111
+    #     weight_add = torch.bitwise_or(weight1_4, weight2_4)
+    #     # The clone() call is used to break the view chain
+    #     return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
+
     def process_weights_after_loading(
         self, layer: torch.nn.Module, is_per_channel_weight, activation_use_clip
     ) -> None:
@@ -830,6 +841,12 @@ class NPUW4A8Int8DynamicMoEMethod(_NPUFusedMoEMethodBase):
             layer.w2_weight.data.transpose(1, 2).contiguous(), requires_grad=False
         )
 
+        # layer.w13_weight.data = self.pack_int4_to_int8(layer.w13_weight.data)
+        # layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
+
+        if self._maybe_apply_fuseep_weights(layer):
+            return
+
         layer.w13_weight.data = npu_format_cast(layer.w13_weight.data)
         layer.w2_weight.data = npu_format_cast(layer.w2_weight.data)
 
@@ -838,6 +855,8 @@ class NPUW4A8Int8DynamicMoEMethod(_NPUFusedMoEMethodBase):
 
         if hasattr(layer, "dispatcher"):
             layer.dispatcher.set_quant_config({"dispatcher_output_dtype": "int8"})
+
+
 
     def _process_weights_without_clip(
         self, layer: torch.nn.Module, is_per_channel_weight

@@ -252,7 +252,7 @@ class KimiMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.num_shared_experts = config.num_shared_experts
         self.layer_idx = layer_idx
-        self.alt_stream = alt_stream
+        self.alt_stream = None
 
         if config.hidden_act not in {"silu", "situ"}:
             raise ValueError(f"Unsupported activation: {config.hidden_act}")

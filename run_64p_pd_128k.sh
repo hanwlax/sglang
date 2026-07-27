@@ -7,7 +7,8 @@ sysctl -w kernel.sched_migration_cost_ns=50000
 export SGLANG_SET_CPU_AFFINITY=1
 export SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=1
 
-MODEL_PATH=/home/weights/Kimi-K3-int4
+MODEL_PATH=/home/weights/Kimi-K3-w4a8-int-8cards-quarot-all-0722
+export ASCEND_MF_STORE_URL="tcp://192.168.25.213:24567"
 
 unset https_proxy
 unset http_proxy
@@ -31,8 +32,9 @@ export DEEPEP_NORMAL_LONG_SEQ_ROUND=64
 export DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS=512
 
 export HCCL_OP_EXPANSION_MODE=AIV
+export SGLANG_KDA_ASCENDC_CONV1D=1
 
-export PYTHONPATH=/home/zkk/sglang/python:$PYTHONPATH
+export PYTHONPATH=/home/fuyong/codes/sglang/python:$PYTHONPATH
 
 P_IP=('192.168.25.213' '192.168.25.214' '192.168.25.215' '192.168.25.218')
 D_IP=('192.168.25.209' '192.168.25.212' '192.168.25.216' '192.168.25.217')
@@ -64,14 +66,16 @@ do
             --dtype bfloat16 \
             --tp-size 64 \
             --enable-dp-attention --dp-size 4 --enable-dp-lm-head \
-            --mem-fraction-static 0.78 \
+            --mem-fraction-static 0.8 \
             --chunked-prefill-size 8192 \
             --max-running-requests 64 \
             --host 0.0.0.0 \
             --port 30000 \
-	        --moe-a2a-backend deepep \
-    	    --deepep-mode normal \
-            --disable-cuda-graph
+            --moe-a2a-backend deepep \
+            --deepep-mode normal \
+            --disable-cuda-graph \
+            --load-balance-method round_robin
+
 
         exit 1
     fi
@@ -105,8 +109,9 @@ do
             --max-running-requests 64 \
             --host 0.0.0.0 \
             --port 30000 \
-	        --moe-a2a-backend deepep \
-    	    --deepep-mode low_latency
+            --moe-a2a-backend deepep \
+            --deepep-mode low_latency \
+            --prefill-round-robin-balance
 
         exit 1
     fi
@@ -115,8 +120,9 @@ done
 exit 1
 
 python -m sglang_router.launch_router \
-    --pd-disaggregation --policy cache_aware \
+    --pd-disaggregation \
     --prefill http://192.168.25.213:30000 8998 \
+    --policy round_robin \
     --decode http://192.168.25.209:30000 \
     --host 0.0.0.0 --port 6688
 
@@ -127,10 +133,10 @@ python -m sglang.bench_serving \
     --backend sglang \
     --host 192.168.25.209 \
     --port 6688 \
-    --max-concurrency 1 \
+    --max-concurrency 4 \
     --random-input-len 8000 \
     --random-output-len 1000 \
-    --num-prompts 1 \
+    --num-prompts 4 \
     --disable-ignore-eos \
     --random-range-ratio 1 \
     --warmup-request 0
@@ -139,10 +145,50 @@ python3 -m sglang.bench_serving \
     --dataset-name generated-shared-prefix \
     --backend sglang --host 192.168.25.209 \
     --port 6688 \
-    --max-concurrency 1 \
+    --max-concurrency 4 \
     --gsp-num-groups 1 \
     --gsp-prompts-per-group 1 \
     --gsp-system-prompt-len 127620 \
     --gsp-question-len 1280 \
     --gsp-output-len 1000 \
     --warmup-requests 4
+
+
+
+# 1st
+python3 -m sglang.bench_serving \
+    --dataset-name generated-shared-prefix \
+    --backend sglang \
+    --host 192.168.25.209 \
+    --port 6688 \
+    --max-concurrency 4 \
+    --gsp-num-groups 1 \
+    --gsp-prompts-per-group 1 \
+    --gsp-system-prompt-len 128329 \
+    --gsp-question-len 1 \
+    --gsp-output-len 1 \
+    --warmup-requests 0 \
+    --num-prompts 4 \
+    --seed 89 \
+    --cache-report \
+    --output-details \
+    --output-file /home/zcl/kda_ttft_cache_diag_2226.jsonl
+
+# 2nd
+python3 -m sglang.bench_serving \
+    --dataset-name generated-shared-prefix \
+    --backend sglang \
+    --host 192.168.25.209 \
+    --port 6688 \
+    --max-concurrency 4 \
+    --gsp-num-groups 1 \
+    --gsp-prompts-per-group 1 \
+    --gsp-system-prompt-len 128329 \
+    --gsp-question-len 1283 \
+    --gsp-output-len 1024 \
+    --warmup-requests 0 \
+    --num-prompts 4 \
+    --seed 89 \
+    --cache-report \
+    --output-details \
+    --output-file /home/zcl/kda_ttft_cache_diag_2257.jsonl
