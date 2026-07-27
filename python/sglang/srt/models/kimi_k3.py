@@ -35,6 +35,7 @@ from sglang.srt.layers.conv import Conv2dLayer
 from sglang.srt.layers.dp_attention import (
     attn_tp_all_gather_into_tensor,
     get_attention_tp_group,
+    get_tp_group,
     get_local_dp_buffer,
     is_dp_attention_enabled,
 )
@@ -945,6 +946,9 @@ class KimiDecoderLayer(nn.Module):
         else:
             # Dense MLP: needs TP_ATTN_FULL
             if self.attn_tp_size > 1 and is_dp_attention_enabled():
+                # torch.npu.synchronize()
+                #
+                # get_tp_group().barrier()
                 hidden_states_full = get_local_dp_buffer(
                     get_attention_tp_group()
                 )

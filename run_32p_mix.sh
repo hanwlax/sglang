@@ -18,13 +18,14 @@ unset HTTPS_PROXY
 unset HTTP_PROXY
 unset ASCEND_LAUNCH_BLOCKING
 
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
+#source /usr/local/Ascend/ascend-toolkit/set_env.sh
+#source /usr/local/Ascend/nnal/atb/set_env.sh
 
 source /home/z30071866/cann9.1.0/cann/set_env.sh
 export ASCEND_CUSTOM_OPP_PATH=/home/z30071866/cann9.1.0/cann-9.1.0-beta.3/opp/vendors/custom_transformer
 
 export LD_LIBRARY_PATH=${ASCEND_HOME_PATH}/opp/vendors/custom_transformer/op_api/lib/:${LD_LIBRARY_PATH}
+
 export SGLANG_NPU_FUSED_MOE_MODE=3
 export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=1024
 

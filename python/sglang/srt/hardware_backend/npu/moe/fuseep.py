@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from sglang.srt.distributed import get_moe_ep_group
+from sglang.srt.distributed import get_moe_ep_group, get_moe_expert_parallel_world_size
 from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.utils import FusedMoEMode, npu_format_cast
 from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPBuffer
@@ -67,6 +67,9 @@ def forward_fuseep(
         # import deepep.bufferf
         buf = _get_fuseep_buffer(layer)
         # print(f"================= {weight1.shape=} {weight1.dtype=}", flush=True)
+        expert_per_rank =max(1,layer.num_experts//int(get_moe_expert_parallel_world_size()))
+        num_max_dispatch_tokens_per_rank = envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
+        max_recv_token_num = max(1, num_max_dispatch_tokens_per_rank * int(get_moe_expert_parallel_world_size()) * min(layer.top_k, expert_per_rank))
         out, _ = buf.fused_deep_moe(
             x=hidden_states,
             topk_idx=topk_output.topk_ids.to(torch.int32),
@@ -75,9 +78,7 @@ def forward_fuseep(
             gmm1_permuted_weight_scale=weight_scales1,
             gmm2_weight=weight2,
             gmm2_weight_scale=weight_scales2,
-            num_max_dispatch_tokens_per_rank=(
-                envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
-            ),
+            num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             backend="mega_moe",
             activation="situ",
             beta=4.0,
@@ -85,6 +86,7 @@ def forward_fuseep(
             l1_bias=layer.w13_scale_bias,
             l2_bias=layer.w2_scale_bias,
             num_experts=layer.num_experts,
+            max_recv_token_num=max_recv_token_num,
             # x_active_mask=x_active_mask,
             # activation_clamp=activation_clamp,
             # weight1_type=layer._mega_moe_weight_type,
