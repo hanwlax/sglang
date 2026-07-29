@@ -6,9 +6,8 @@ sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 export SGLANG_SET_CPU_AFFINITY=1
 export SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=1
+export SGLANG_NPU_USE_TRITON_PREFIX_KV_CACHE_STORE=1
 # export TRITON_ALL_BLOCKS_PARALLEL=1
-# MODEL_PATH=/home/weights/Kimi-K3-int4
-# DRAFT_MODEL_PATH=/home/weights/DSpark-Kimi-K3-yi
 MODEL_PATH=/home/weights/Kimi-K3-w4a8-int-moe
 DRAFT_MODEL_PATH=/home/weights/RadixArk-Kimi-K3-DSpark
 
@@ -77,14 +76,14 @@ do
             --reasoning-parser kimi_k3 \
 	        --moe-a2a-backend deepep \
             --deepep-mode auto \
-            --watchdog-timeout 9000  2>&1 | tee "/home/hanwlax/workspace/progress/kimi_k3/logs/run_32p_mix_$(date +%Y-%m-%d_%H-%M-%S).log"
+            --watchdog-timeout 9000  2>&1 | tee "logs/run_32p_mix_$(date +%Y-%m-%d_%H-%M-%S).log"
         exit 1
     fi
 done
 
 exit 1
 
-sglang server \
+# spec options
     --speculative-algorithm DSPARK \
     --speculative-draft-model-path "$DRAFT_MODEL_PATH" \
     --speculative-dspark-block-size 7 \
