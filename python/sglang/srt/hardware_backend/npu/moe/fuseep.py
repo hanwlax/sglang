@@ -211,14 +211,26 @@ def process_fuseep_weights(layer: torch.nn.Module) -> None:
             w2_scale.to(torch.float32), requires_grad=False
         )
     else:
-        # print(f"=================209 ======= ", flush=True)
-        layer.w13_weight.data = npu_format_cast(layer.w13_weight.data)
-        layer.w2_weight.data = npu_format_cast(layer.w2_weight.data)
-        layer.cann_mega_moe_w13_weight_list = [weight.clone().view(torch.int32) for weight in layer.w13_weight.data.unbind(dim=0)]
-        layer.cann_mega_moe_w2_weight_list = [weight.clone().view(torch.int32) for weight in layer.w2_weight.data.unbind(dim=0)]
+        # MegaMoe consumes one independently formatted 2D tensor per local
+        # expert. Casting the stacked 3D tensor before unbinding produces the
+        # grouped-GMM layout instead of the per-expert MegaMoe layout.
+        layer.cann_mega_moe_w13_weight_list = [
+            npu_format_cast(weight.contiguous()).view(torch.int32)
+            for weight in layer.w13_weight.data.unbind(dim=0)
+        ]
+        layer.cann_mega_moe_w2_weight_list = [
+            npu_format_cast(weight.contiguous()).view(torch.int32)
+            for weight in layer.w2_weight.data.unbind(dim=0)
+        ]
 
-        layer.cann_mega_moe_w13_weight_scale_list = [t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)]
-        layer.cann_mega_moe_w2_weight_scale_list = [t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)]
+        layer.cann_mega_moe_w13_weight_scale_list = [
+            scale.contiguous().reshape(-1).view(torch.uint64)
+            for scale in layer.w13_weight_scale.data.unbind(dim=0)
+        ]
+        layer.cann_mega_moe_w2_weight_scale_list = [
+            scale.contiguous().reshape(-1).view(torch.uint64)
+            for scale in layer.w2_weight_scale.data.unbind(dim=0)
+        ]
         if not hasattr(layer, "w13_scale_bias"):
             raise RuntimeError(
                 "MegaMoe only support W4A8 INT on A2/A3 for weight with w1 scale bias and w2 scale bias."
