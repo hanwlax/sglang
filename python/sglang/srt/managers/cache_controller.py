@@ -1041,8 +1041,9 @@ class HiCacheController:
                     # not to prefetch if not enough benefits
                     self.prefetch_revoke_queue.put(operation.request_id)
                     self.append_host_mem_release(operation.host_indices)
-                    logger.debug(
-                        f"Revoking prefetch for request {operation.request_id} due to insufficient hits ({storage_hit_count})."
+                    logger.info(
+                        f"[L3-MISS] Revoking prefetch for request {operation.request_id} "
+                        f"due to insufficient hits ({storage_hit_count} < {self.prefetch_threshold})."
                     )
                 else:
                     operation.hash_value = hash_value[
@@ -1053,8 +1054,9 @@ class HiCacheController:
                         operation.host_indices[storage_hit_count:]
                     )
                     operation.host_indices = operation.host_indices[:storage_hit_count]
-                    logger.debug(
-                        f"Prefetching {len(operation.hash_value)} pages for request {operation.request_id}."
+                    logger.info(
+                        f"[L3-HIT] Prefetching {len(operation.hash_value)} pages "
+                        f"({storage_hit_count} tokens) for request {operation.request_id}."
                     )
                     self.prefetch_buffer.put(operation)
 
@@ -1195,6 +1197,10 @@ class HiCacheController:
 
                 if not self.backup_skip:
                     self._page_backup(operation)
+                    logger.info(
+                        f"[L3-BACKUP] Backed up {len(operation.hash_value) if operation.hash_value else 0} "
+                        f"pages to storage for op {operation.id}."
+                    )
                 self.ack_backup_queue.put(operation)
 
             except Empty:
