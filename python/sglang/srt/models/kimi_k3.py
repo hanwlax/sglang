@@ -255,7 +255,6 @@ class KimiMoE(nn.Module):
         self.num_shared_experts = config.num_shared_experts
         self.layer_idx = layer_idx
         self.alt_stream = alt_stream
-        self.alt_stream = None
 
         if config.hidden_act not in {"silu", "situ"}:
             raise ValueError(f"Unsupported activation: {config.hidden_act}")
@@ -341,18 +340,40 @@ class KimiMoE(nn.Module):
                 ),
             )
 
-    def _forward_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Run the TP-sharded shared MLP while keeping MoE tokens scattered."""
+    def _prepare_shared_experts_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, bool]:
+        """Gather shared-expert input on the current stream when DP attention shards tokens."""
         if not (is_dp_attention_enabled() and get_parallel().attn_tp_size > 1):
-            return self.shared_experts(hidden_states)
+            return hidden_states, False
 
         gathered_hidden_states = get_local_dp_buffer(get_attention_tp_group())
         attn_tp_all_gather_into_tensor(gathered_hidden_states, hidden_states)
+        return gathered_hidden_states, True
 
-        gathered_shared_output = self.shared_experts(gathered_hidden_states)
+    @staticmethod
+    def _finalize_shared_experts_output(
+        gathered_shared_output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        needs_reduce_scatter: bool,
+    ) -> torch.Tensor:
+        """Reduce-scatter shared-expert output on the current stream."""
+        if not needs_reduce_scatter:
+            return gathered_shared_output
+
         shared_output = torch.empty_like(hidden_states)
         attn_tp_reduce_scatter_tensor(shared_output, gathered_shared_output)
         return shared_output
+
+    def _forward_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Run the TP-sharded shared MLP while keeping MoE tokens scattered."""
+        shared_input, needs_reduce_scatter = self._prepare_shared_experts_input(
+            hidden_states
+        )
+        gathered_shared_output = self.shared_experts(shared_input)
+        return self._finalize_shared_experts_output(
+            gathered_shared_output, hidden_states, needs_reduce_scatter
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -384,19 +405,33 @@ class KimiMoE(nn.Module):
             and get_is_capture_mode()
         ):
             current_stream = torch.cuda.current_stream()
-            self.alt_stream.wait_stream(current_stream)
 
             if use_attn_tp_comm:
-                shared_output = self.shared_experts(hidden_states.clone())
+                shared_input = hidden_states.clone()
+                shared_output_needs_reduce_scatter = False
             else:
-                shared_output = self._forward_shared_experts(hidden_states.clone())
+                shared_input, shared_output_needs_reduce_scatter = (
+                    self._prepare_shared_experts_input(hidden_states.clone())
+                )
 
+            # Keep all HCCL/DeepEP collectives on the current stream.  The
+            # alternate stream only executes the shared-expert MLP, so NPU
+            # graph capture does not need to order collectives across streams.
+            shared_input.record_stream(self.alt_stream)
+            self.alt_stream.wait_stream(current_stream)
             with torch.cuda.stream(self.alt_stream):
-                router_logits, _ = self.gate(hidden_states)
-                topk_output = self.topk(hidden_states, router_logits)
-                final_hidden_states = self.experts(routed_hidden_states, topk_output)
+                gathered_shared_output = self.shared_experts(shared_input)
+
+            router_logits, _ = self.gate(hidden_states)
+            topk_output = self.topk(hidden_states, router_logits)
+            final_hidden_states = self.experts(routed_hidden_states, topk_output)
 
             current_stream.wait_stream(self.alt_stream)
+            shared_output = self._finalize_shared_experts_output(
+                gathered_shared_output,
+                hidden_states,
+                shared_output_needs_reduce_scatter,
+            )
         else:
             if self.num_shared_experts is not None and hidden_states.shape[0] > 0:
                 if use_attn_tp_comm:
