@@ -1,5 +1,6 @@
 import unittest
 
+import requests
 from sglang.test.ascend.e2e.test_npu_multi_node_utils import NIC_NAME
 from sglang.test.ascend.e2e.test_npu_performance_utils import (
     AISBENCHMARK_DATASET_DEFAULT,
@@ -96,6 +97,7 @@ KIMI_K2_6_OTHER_ARGS = [
     "kimi_k2",
     "--tool-call-parser",
     "kimi_k2",
+    "--enable-metrics",
 ]
 
 
@@ -120,6 +122,15 @@ class TestKimiK25W4A8(TestAscendPerformanceTestCaseBase):
 
     def test_kimi_k2_6_w4a8(self):
         self.run_throughput()
+
+        metrics = requests.get(
+            f"{self.base_url}/metrics",
+            timeout=10,
+        ).text
+
+        for line in metrics.splitlines():
+            if line.startswith("sglang:prefill_delayer_outcomes_total"):
+                print(line)
 
 
 if __name__ == "__main__":
