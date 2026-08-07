@@ -100,6 +100,12 @@ def maybe_register_hicache_draft(
     if isinstance(pool, HybridLinearKVPool):
         pool = pool.full_kv_pool
 
+    draft_layout = server_args.hicache_mem_layout
+    if (
+        isinstance(pool, MHATokenToKVPool)
+        and draft_layout == "page_first_kv_split"
+    ):
+        draft_layout = "page_first_direct"
     # Create host pool for draft with the same slot count as the target host pool,
     # so that host indices stay 1-to-1 between target and draft KV caches.
     primary = tree_cache.cache_controller.mem_pool_host
@@ -107,7 +113,7 @@ def maybe_register_hicache_draft(
         host_to_device_ratio=primary.size / pool.size,
         host_size=0,
         page_size=page_size,
-        layout=server_args.hicache_mem_layout,
+        layout=draft_layout,
         allocator_type=server_args.hicache_storage_backend,
     )
     if isinstance(pool, MHATokenToKVPool):

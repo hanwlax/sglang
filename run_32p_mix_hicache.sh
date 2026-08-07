@@ -34,8 +34,7 @@ export STREAMS_PER_DEVICE=32
 export DEEP_NORMAL_MODE_USE_INT8_QUANT=1
 
 export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=128
-export HCCL_BUFFSIZE=200
-export DEEPEP_HCCL_BUFFSIZE=1800
+export HCCL_BUFFSIZE=2000
 export DEEPEP_NORMAL_LONG_SEQ_ROUND=64
 export DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS=512
 export DEEPEP_NORMAL_COMBINE_ENABLE_LONG_SEQ=1
@@ -71,7 +70,7 @@ do
 
         sglang serve \
             --model-loader-extra-config '{"enable_multithread_load": true}' \
-            --dist-init-addr 192.168.25.209:5000 --nnodes 4 --node-rank $i \
+            --dist-init-addr 192.168.25.209:4000 --nnodes 4 --node-rank $i \
             --model-path $MODEL_PATH \
             --tokenizer-path $MODEL_PATH \
             --trust-remote-code \
@@ -96,15 +95,16 @@ do
             --speculative-draft-attention-backend ascend \
             --speculative-eagle-topk 1 \
             --speculative-draft-model-quantization unquant \
-            --enable-hierarchical-cache --hicache-io-backend kernel_ascend \
-            --hicache-storage-backend ascend_memcache \
-            --hicache-storage-backend-extra-config '{"meta_service_url":"tcp://127.0.0.1:5001", "config_store_url":"tcp://127.0.0.1:6001", "log_level":"info", "world_size":256, "protocol": "device_sdma", "prefetch_threshold": 1, "dram_size": "50GB"}' \
+            --enable-hierarchical-cache --hicache-io-backend kernel_ascend --enable-cache-report \
             --watchdog-timeout 9000  2>&1 | tee "logs/run_32p_mix_$(date +%Y-%m-%d_%H-%M-%S).log"
         exit 1 
     fi
 done
 
 exit 1
+# hicahce l3 options
+            --hicache-storage-backend ascend_memcache \
+            --hicache-storage-backend-extra-config '{"meta_service_url":"tcp://127.0.0.1:5001", "config_store_url":"tcp://127.0.0.1:6001", "log_level":"info", "world_size":256, "protocol": "device_sdma", "prefetch_threshold": 1, "dram_size": "50GB"}' \
 
 # spec options
             --speculative-algorithm DSPARK \

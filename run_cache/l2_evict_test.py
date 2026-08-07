@@ -30,8 +30,8 @@ NUM_INTERFERENCE = int(sys.argv[2]) if len(sys.argv) > 2 else 12
 GENERATE_URL = f"{SERVER}/generate"
 
 # 共享前缀长度(token 数)和干扰文本长度(token 数), 可按 device 池大小调整
-PREFIX_TOKENS = 57_600   # 与 perf.sh 的 --gsp-system-prompt-len 一致
-INTERFERE_TOKENS = 65_000
+PREFIX_TOKENS = 126_720   # 与 perf.sh 的 --gsp-system-prompt-len 一致
+INTERFERE_TOKENS = 230_000
 
 # ---------------- 文本生成 ----------------
 _SENTENCES = [
