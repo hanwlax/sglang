@@ -23,4 +23,4 @@ evalscope eval \
       }
     }' \
     --eval-batch-size 32 \
-    --seed 42
+    --seed 42 2>&1 | tee "gpqa_$(date +%Y-%m-%d_%H-%M-%S).log"
