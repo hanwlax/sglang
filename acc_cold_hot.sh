@@ -164,7 +164,7 @@ python3 -m sglang.bench_serving \
     --max-concurrency 1 \
     --gsp-num-groups 1 \
     --gsp-prompts-per-group 1 \
-    --gsp-system-prompt-len 230000 \
+    --gsp-system-prompt-len 260000 \
     --gsp-question-len 0 \
     --gsp-output-len 1 \
     --warmup-requests 0 \

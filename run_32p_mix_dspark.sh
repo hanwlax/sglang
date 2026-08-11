@@ -38,7 +38,7 @@ export HCCL_BUFFSIZE=200
 export DEEPEP_HCCL_BUFFSIZE=1800
 export DEEPEP_NORMAL_LONG_SEQ_ROUND=64
 export DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS=512
-export DEEPEP_NORMAL_COMBINE_ENABLE_LONG_SEQ=1
+# export DEEPEP_NORMAL_COMBINE_ENABLE_LONG_SEQ=1
 
 export HCCL_OP_EXPANSION_MODE=AIV
 
@@ -184,37 +184,45 @@ python -m sglang.bench_serving \
   --num-prompts 1 \
   --disable-ignore-eos \
   --random-range-ratio 1 \
-  --warmup-request 0
+  --warmup-request 1 \
+  --flush-cache
 
 # 128k_1k_99cache_bs1
-curl --location 'http://0.0.0.0:30000/flush_cache' --header 'Content-Type: application/json'
-python3 -m sglang.bench_serving \
-    --dataset-name generated-shared-prefix \
-    --backend sglang --host 192.168.25.209 \
-    --port 30000 \
-    --max-concurrency 1 \
-    --gsp-num-groups 1 \
-    --gsp-prompts-per-group 1 \
-    --gsp-system-prompt-len 127620 \
-    --gsp-question-len 0 \
-    --gsp-output-len 1 \
-    --warmup-requests 0 \
-    --seed 1 \
-    --extra-request-body '{"routed_dp_rank": 0}'
+#hot 2
+curl --location 'http://127.0.0.1:30000/flush_cache' --header 'Content-Type: application/json'
+python -m sglang.bench_serving \
+  --dataset-path /home/zkk/datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --dataset-name random \
+  --backend sglang \
+  --host 127.0.0.1 \
+  --port 30000 \
+  --max-concurrency 1 \
+  --random-input-len 126720 \
+  --random-output-len 1 \
+  --num-prompts 1 \
+  --seed 1 \
+  --random-range-ratio 1 \
+  --warmup-requests 1 \
+  --output-details \
+  --output-file random_128k.jsonl \
+  --extra-request-body '{"routed_dp_rank": 0}'
 
-python3 -m sglang.bench_serving \
-    --dataset-name generated-shared-prefix \
-    --backend sglang --host 192.168.25.209 \
-    --port 30000 \
-    --max-concurrency 1 \
-    --gsp-num-groups 1 \
-    --gsp-prompts-per-group 1 \
-    --gsp-system-prompt-len 127620 \
-    --gsp-question-len 1280 \
-    --gsp-output-len 1000 \
-    --warmup-requests 0 \
-    --seed 1 \
-    --extra-request-body '{"routed_dp_rank": 0}'
+python -m sglang.bench_serving \
+  --dataset-path /home/zkk/datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --dataset-name random \
+  --backend sglang \
+  --host 127.0.0.1 \
+  --port 30000 \
+  --max-concurrency 1 \
+  --random-input-len 128000 \
+  --random-output-len 1000 \
+  --num-prompts 1 \
+  --seed 1 \
+  --random-range-ratio 1 \
+  --warmup-requests 1 \
+  --output-details \
+  --output-file random_128k.jsonl \
+  --extra-request-body '{"routed_dp_rank": 0}'
 
 # 128k_1k_99cache_bs4
 curl --location 'http://0.0.0.0:30000/flush_cache' --header 'Content-Type: application/json'
