@@ -4,7 +4,7 @@ cat > metaservice_config.json <<'EOF'
 {
   "meta_service_url": "tcp://127.0.0.1:5000",
   "config_store_url": "tcp://127.0.0.1:6000",
-  "metrics_url": "http://127.0.0.1:8000",
+  "metrics_url": "http://127.0.0.1:8000"
 }
 EOF
 
