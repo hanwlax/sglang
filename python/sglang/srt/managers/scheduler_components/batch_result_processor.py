@@ -837,6 +837,71 @@ class SchedulerBatchResultProcessor:
                 num_block_accept_tokens=result.num_block_accept_tokens,
                 num_cap_tokens=result.num_cap_tokens,
             )
+
+            # # Log once on the scheduler rank that owns request-level statistics.
+            # # In a TP group every rank participates in the verify forward, but the
+            # # accept result is shared, so logging on every TP rank is redundant.
+            # if (
+            #     self.metrics_reporter.is_stats_logging_rank
+            #     and getattr(
+            #         result, "num_correct_drafts_per_req_cpu", None
+            #     ) is not None
+            # ):
+            #     reporter = self.metrics_reporter
+            #     dp_rank = reporter.dp_rank if reporter.dp_rank is not None else 0
+
+            #     for req, num_correct_drafts in zip(
+            #         batch.reqs, result.num_correct_drafts_per_req_cpu
+            #     ):
+            #         if req.is_retracted or req.finished():
+            #             continue
+
+            #         # Accept length includes the bonus token; correct drafts do not.
+            #         num_accept_tokens = num_correct_drafts + 1
+            #         request_avg_accept_length = (
+            #             (req.spec_num_correct_drafts + req.spec_verify_ct)
+            #             / req.spec_verify_ct
+            #             if req.spec_verify_ct > 0
+            #             else 0.0
+            #         )
+            #         logger.info(
+            #             "Spec verify: node_rank=%d, dp_rank=%d, tp_rank=%d, "
+            #             "rid=%s, verify_ct=%d, num_accept_tokens=%d, "
+            #             "num_correct_drafts=%d, request_avg_accept_length=%.3f",
+            #             self.server_args.node_rank,
+            #             dp_rank,
+            #             reporter.tp_rank,
+            #             req.rid,
+            #             req.spec_verify_ct,
+            #             num_accept_tokens,
+            #             num_correct_drafts,
+            #             request_avg_accept_length,
+            #         )
+
+            #     # Include both the archived lifetime counters and the current
+            #     # decode-log window so this value is current on every verify step.
+            #     rank_num_accept_tokens = (
+            #         reporter.spec_total_num_accept_tokens
+            #         + reporter.spec_num_accept_tokens
+            #     )
+            #     rank_verify_ct = (
+            #         reporter.spec_total_num_forward_ct
+            #         + reporter.spec_num_forward_ct
+            #     )
+            #     rank_avg_accept_length = (
+            #         rank_num_accept_tokens / rank_verify_ct
+            #         if rank_verify_ct > 0
+            #         else 0.0
+            #     )
+            #     logger.info(
+            #         "Spec rank stats: node_rank=%d, dp_rank=%d, tp_rank=%d, "
+            #         "verify_ct=%d, avg_accept_length=%.3f",
+            #         self.server_args.node_rank,
+            #         dp_rank,
+            #         reporter.tp_rank,
+            #         rank_verify_ct,
+            #         rank_avg_accept_length,
+            #     )
         if get_observability().enable_metrics:
             self.metrics_collector.increment_decode_cuda_graph_pass(
                 value=can_run_cuda_graph
