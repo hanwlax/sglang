@@ -341,9 +341,30 @@ class AscendAttnBackend(AttentionBackend):
         self.use_fa = get_bool_env_var("ASCEND_USE_FA", "False")
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
         self.use_fias_v2_bsnd = envs.SGLANG_NPU_USE_FIAS_V2_BSND.get()
+        self.use_triton_paged_attention_decode = (
+            envs.SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE.get()
+        )
+        self.triton_paged_attention_decode_impl = None
+        if self.use_triton_paged_attention_decode:
+            from sgl_kernel_npu.attention.flash_attention import (
+                paged_attention_decode_impl,
+            )
+
+            self.triton_paged_attention_decode_impl = paged_attention_decode_impl
+        if self.use_fias_v2_bsnd and self.use_triton_paged_attention_decode:
+            raise ValueError(
+                "SGLANG_NPU_USE_FIAS_V2_BSND and "
+                "SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE are mutually "
+                "exclusive target-verify attention backends."
+            )
         self.debug_fias_v2_parity = (
             envs.SGLANG_DEBUG_NPU_FIAS_V2_PARITY.get()
         )
+        if self.use_triton_paged_attention_decode and self.debug_fias_v2_parity:
+            raise ValueError(
+                "SGLANG_DEBUG_NPU_FIAS_V2_PARITY only applies to the FIAS v2 "
+                "backend; disable it when selecting Triton paged attention."
+            )
         self.debug_fias_v2_parity_layer = (
             envs.SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER.get()
         )
@@ -2022,7 +2043,7 @@ class AscendAttnBackend(AttentionBackend):
                 actual_seq_lengths_kv = self.forward_metadata.seq_lens_cpu_list
             else:
                 actual_seq_lengths_kv = (
-                    self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
+                    self.forward_metadata.seq_lens_cpu_int.int().tolist()
                 )
 
             if forward_batch.forward_mode.is_draft_extend_v2():
@@ -2136,7 +2157,7 @@ class AscendAttnBackend(AttentionBackend):
                 actual_seq_lengths_kv = self.forward_metadata.seq_lens_cpu_list
             else:
                 actual_seq_lengths_kv = (
-                    self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
+                    self.forward_metadata.seq_lens_cpu_int.int().tolist()
                 )
             actual_seq_lengths = np.arange(
                 self.speculative_num_draft_tokens,
@@ -2188,6 +2209,65 @@ class AscendAttnBackend(AttentionBackend):
                 q_rope = torch.cat([q_rope, rope_padding], dim=1).contiguous()
 
             num_query_heads = self.q_head_num_padding or layer.tp_q_head_num
+            triton_paged_attention_output = None
+            if self.use_triton_paged_attention_decode:
+                if is_fia_nz():
+                    raise RuntimeError(
+                        "The Triton paged-attention decode kernel requires BNSD "
+                        "KV cache and does not support FIA NZ cache format."
+                    )
+                query_seq_len = self.speculative_num_draft_tokens
+                batch_size = len(actual_seq_lengths_kv)
+                expected_num_tokens = batch_size * query_seq_len
+                assert q_nope.shape[0] == expected_num_tokens, (
+                    "Triton paged target verify expects one fixed speculative "
+                    f"block per request: got {q_nope.shape[0]} query tokens for "
+                    f"batch_size={batch_size}, query_seq_len={query_seq_len}."
+                )
+
+                # The decode kernel handles one query token per batch row. Turn
+                # each speculative block into S independent causal decode rows:
+                # token j sees KV through final_kv_len - (S - 1 - j).
+                if self.forward_metadata.seq_lens_cpu_int is not None:
+                    seq_lens_cpu = self.forward_metadata.seq_lens_cpu_int[:batch_size]
+                    max_kv_len = int(seq_lens_cpu.max().item())
+                    final_seq_lens = seq_lens_cpu.to(
+                        device=q_nope.device, dtype=torch.int32
+                    )
+                else:
+                    seq_lens_cpu = self.forward_metadata.seq_lens_cpu_list[:batch_size]
+                    max_kv_len = max(seq_lens_cpu, default=0)
+                    # Graph metadata already contains target-verify's final KV
+                    # lengths in its device buffer; keep replay device-only.
+                    final_seq_lens = self.forward_metadata.seq_lens[:batch_size]
+                causal_offsets = torch.arange(
+                    query_seq_len - 1,
+                    -1,
+                    -1,
+                    dtype=torch.int32,
+                    device=q_nope.device,
+                )
+                per_token_seq_lens = (
+                    final_seq_lens[:, None] - causal_offsets[None, :]
+                ).reshape(-1)
+                per_token_block_tables = block_table.repeat_interleave(
+                    query_seq_len, dim=0
+                ).contiguous()
+                query = torch.cat([q_nope, q_rope], dim=-1).contiguous()
+                triton_paged_attention_output = (
+                    self.triton_paged_attention_decode_impl(
+                        q=query,
+                        key_cache=c_kv_cache,
+                        value_cache=c_kv_cache,
+                        seqlens=per_token_seq_lens,
+                        block_tables=per_token_block_tables,
+                        max_kv_len=max_kv_len,
+                        gqa_interleave=True,
+                        softmax_scale=layer.scaling,
+                        key_rope_cache=k_rope_cache,
+                    )
+                )
+
             should_compare_fias_v2 = (
                 self.use_fias_v2_bsnd
                 and self.debug_fias_v2_parity
@@ -2287,7 +2367,10 @@ class AscendAttnBackend(AttentionBackend):
             # Parity mode always returns the v1 reference so the diagnostic
             # itself cannot change speculative acceptance. It runs v2 only
             # once, on the selected layer, and uses v1 directly elsewhere.
-            if not self.use_fias_v2_bsnd or self.debug_fias_v2_parity:
+            if (
+                not self.use_fias_v2_bsnd
+                and not self.use_triton_paged_attention_decode
+            ) or self.debug_fias_v2_parity:
                 workspace = (
                     torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                         q_nope,
@@ -2367,7 +2450,11 @@ class AscendAttnBackend(AttentionBackend):
                         )
                     self.fias_v2_parity_checked = True
             else:
-                attn_output = fias_v2_output
+                attn_output = (
+                    triton_paged_attention_output
+                    if self.use_triton_paged_attention_decode
+                    else fias_v2_output
+                )
             attn_output = attn_output[:, : layer.tp_q_head_num, :]
             attn_output = attn_output.view(-1, layer.tp_q_head_num * layer.v_head_dim)
             if (

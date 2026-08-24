@@ -24,7 +24,11 @@ export SGLANG_NPU_PROFILING_PATH="/home/hanwlax/workspace/progress/kimi_k3/profi
 # A/B
 export SGLANG_USE_RECOMPUTE_BEFORE=0  # 优化前算子：1
 export SGLANG_KDA_USE_CONV_STATE_TRACK_COPY=1  # 使用算子做COPY：1
-export USE_PHYSICS_GRID=1  # 使用物理分核：1
+export USE_PHYSICS_GRID=0  # 使用物理分核：1
+# FIAS V1
+export SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE=0
+export SGLANG_NPU_USE_FIAS_V2_BSND=0
+export SGLANG_DEBUG_NPU_FIAS_V2_PARITY=0
 
 # PYTHONPATH
 CODEPATH="/home/hanwlax/test-codes/k3"
@@ -72,8 +76,6 @@ do
         export SGLANG_USE_FIA_NZ=0
         # FIAS v1/v2 numerical parity diagnosis. The model continues with the
         # v1 reference output; v2 is shadow-executed once at the exact DP batch.
-        export SGLANG_NPU_USE_FIAS_V2_BSND=1
-        export SGLANG_DEBUG_NPU_FIAS_V2_PARITY=1
         export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER=3
         export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE=8
 

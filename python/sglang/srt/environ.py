@@ -819,6 +819,8 @@ class Envs:
     # Use FIAS v2 BNSD for MLA speculative target verification. The experimental
     # variable retains its original name for compatibility with existing runs.
     SGLANG_NPU_USE_FIAS_V2_BSND = EnvBool(False)
+    # Use the Triton BNSD paged-attention decode kernel for MLA target verify.
+    SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE = EnvBool(False)
     # Compare one FIAS v2 target-attention output against the FIAS v1 reference.
     SGLANG_DEBUG_NPU_FIAS_V2_PARITY = EnvBool(False)
     SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER = EnvInt(0)
