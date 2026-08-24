@@ -189,7 +189,7 @@ fi
 select_case "${1:-}" || exit $?
 
 date_str=$(date +%Y-%m-%d_%H-%M-%S)
-RUN_DIR="${LOG_ROOT}/${date_str}"
+RUN_DIR="${LOG_ROOT}/${CASE_NAMES[$SELECTED_CASE]}_${date_str}"
 LOG_FILE="${RUN_DIR}/run.log"
 DETAIL_FILE="${RUN_DIR}/detail.jsonl"
 mkdir -p "$RUN_DIR"

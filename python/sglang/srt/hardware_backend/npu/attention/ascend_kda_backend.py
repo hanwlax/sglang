@@ -12,6 +12,7 @@ from sgl_kernel_npu.fla.kda_prefill import (
     recompute_w_u_fwd_npu,
 )
 from sgl_kernel_npu.fla.kda_target_verify import kda_target_verify_npu
+from sgl_kernel_npu.fla.kda_target_verify_grid import kda_target_verify_npu_grid
 from sgl_kernel_npu.fla.solve_tril import solve_tril_npu
 from sgl_kernel_npu.fla.utils import prepare_chunk_indices
 
@@ -450,7 +451,9 @@ class AscendKDAAttnBackend(KDAAttnBackend):
             lower_bound=layer.lower_bound,
         )
         preactivated_b = dense_b.float().sigmoid()
-        out = kda_target_verify_npu(
+
+        kda_target_verify = kda_target_verify_npu_grid if os.getenv("USE_PHYSICS_GRID", "0") == "1" else kda_target_verify_npu
+        out = kda_target_verify(
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,
             q=q,

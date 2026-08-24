@@ -25,6 +25,7 @@ export SGLANG_NPU_PROFILING_PATH="/home/hanwlax/workspace/progress/kimi_k3/profi
 # A/B
 export SGLANG_USE_RECOMPUTE_BEFORE=0  # 优化前算子：1
 export SGLANG_KDA_USE_CONV_STATE_TRACK_COPY=1  # 使用算子做COPY：1
+export USE_PHYSICS_GRID=1  # 使用物理分核：1
 
 # PYTHONPATH
 CODEPATH="/home/hanwlax/test-codes/k3"
