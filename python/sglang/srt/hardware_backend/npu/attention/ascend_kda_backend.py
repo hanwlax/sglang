@@ -78,6 +78,8 @@ class _AscendKDAExtendKernel:
         if os.getenv("SGLANG_USE_RECOMPUTE_BEFORE", "0") == "1":
             from sgl_kernel_npu.fla.kda_prefill import recompute_w_u_fwd_npu_before
             recompute_w_u_fwd = recompute_w_u_fwd_npu_before
+        else:
+            recompute_w_u_fwd = recompute_w_u_fwd_npu
 
         w, u, _, gated_k = recompute_w_u_fwd(
             k=k,

@@ -12,6 +12,7 @@ from sgl_kernel_npu.attention.sinks_attention import (
 
 from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.dllm.config import DllmConfig
+from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.attention.ascend_torch_native_backend import (
     AscendTorchNativeAttnBackend,
 )
@@ -339,6 +340,17 @@ class AscendAttnBackend(AttentionBackend):
         self.graph_mode = False
         self.use_fa = get_bool_env_var("ASCEND_USE_FA", "False")
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
+        self.use_fias_v2_bsnd = envs.SGLANG_NPU_USE_FIAS_V2_BSND.get()
+        self.debug_fias_v2_parity = (
+            envs.SGLANG_DEBUG_NPU_FIAS_V2_PARITY.get()
+        )
+        self.debug_fias_v2_parity_layer = (
+            envs.SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER.get()
+        )
+        self.debug_fias_v2_parity_batch_size = (
+            envs.SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE.get()
+        )
+        self.fias_v2_parity_checked = False
         self.enable_torch_compile = get_flags().capture.enable_torch_compile
         self.speculative_num_draft_tokens = get_spec().speculative_num_draft_tokens
         if (
@@ -443,7 +455,12 @@ class AscendAttnBackend(AttentionBackend):
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init the metadata for a forward pass."""
         self.forward_metadata = ForwardMetadata()
-        if forward_batch.forward_mode.is_target_verify():
+        if forward_batch.batch_size == 0:
+            # Under DP-attention, DSpark keeps non-owning DP ranks in the
+            # target forward for collective participation.  Their local batch
+            # is empty, so neither seq_lens nor seq_lens_cpu has a maximum.
+            seq_lens_max = 0
+        elif forward_batch.forward_mode.is_target_verify():
             # Overlap scheduling can publish the CPU sequence length one step
             # ahead of the device tensor. FIA consumes seq_lens_cpu below, so
             # derive the block-table width from the same source. Otherwise a
@@ -2170,48 +2187,187 @@ class AscendAttnBackend(AttentionBackend):
                 q_nope = torch.cat([q_nope, nope_padding], dim=1).contiguous()
                 q_rope = torch.cat([q_rope, rope_padding], dim=1).contiguous()
 
-            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                q_nope,
-                c_kv_cache,
-                c_kv_cache,
-                query_rope=q_rope,
-                key_rope=k_rope_cache,
-                num_heads=self.q_head_num_padding,
-                num_key_value_heads=layer.tp_k_head_num,
-                input_layout="TND",
-                scale=layer.scaling,
-                antiquant_mode=0,
-                antiquant_scale=None,
-                block_table=block_table,
-                block_size=self.page_size,
-                sparse_mode=3,
-                atten_mask=self.mtp_mask,
-                actual_seq_lengths=actual_seq_lengths,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_query_heads = self.q_head_num_padding or layer.tp_q_head_num
+            should_compare_fias_v2 = (
+                self.use_fias_v2_bsnd
+                and self.debug_fias_v2_parity
+                and not self.fias_v2_parity_checked
+                and layer.layer_id == self.debug_fias_v2_parity_layer
+                and (
+                    self.debug_fias_v2_parity_batch_size is None
+                    or len(actual_seq_lengths_kv)
+                    == self.debug_fias_v2_parity_batch_size
+                )
             )
-            attn_output = torch.empty_like(q_nope, dtype=q.dtype, device=q.device)
-            softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
-            torch_npu.npu_fused_infer_attention_score.out(
-                q_nope,
-                c_kv_cache,
-                c_kv_cache,
-                query_rope=q_rope,
-                key_rope=k_rope_cache,
-                num_heads=self.q_head_num_padding,
-                num_key_value_heads=layer.tp_k_head_num,
-                input_layout="TND",
-                scale=layer.scaling,
-                antiquant_mode=0,
-                antiquant_scale=None,
-                block_table=block_table,
-                block_size=self.page_size,
-                sparse_mode=3,
-                atten_mask=self.mtp_mask,
-                actual_seq_lengths=actual_seq_lengths,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                workspace=workspace,
-                out=[attn_output, softmax_lse],
+            if should_compare_fias_v2 and self.graph_mode:
+                raise RuntimeError(
+                    "SGLANG_DEBUG_NPU_FIAS_V2_PARITY requires "
+                    "--disable-cuda-graph so it can inspect real eager outputs."
+                )
+
+            run_fias_v2 = self.use_fias_v2_bsnd and (
+                not self.debug_fias_v2_parity or should_compare_fias_v2
             )
+            fias_v2_output = None
+            if run_fias_v2:
+                # FIAS v2 does not support paged attention with TND input. The
+                # existing KV cache is [block, KV_N, block_size, D], for which
+                # FIAS v2 page attention requires BNSD (BSND only supports a
+                # flattened [block, block_size, H] KV cache).
+                query_seq_len = self.speculative_num_draft_tokens
+                batch_size = len(actual_seq_lengths_kv)
+                expected_num_tokens = batch_size * query_seq_len
+                assert q_nope.shape[0] == expected_num_tokens, (
+                    "FIAS v2 BNSD target verify expects one fixed speculative "
+                    f"block per request: got {q_nope.shape[0]} query tokens for "
+                    f"batch_size={batch_size}, query_seq_len={query_seq_len}."
+                )
+                q_nope_bsnd = q_nope.view(
+                    batch_size, query_seq_len, num_query_heads, self.kv_lora_rank
+                )
+                q_rope_bsnd = q_rope.view(
+                    batch_size,
+                    query_seq_len,
+                    num_query_heads,
+                    self.qk_rope_head_dim,
+                )
+                q_nope_bnsd = q_nope_bsnd.transpose(1, 2).contiguous()
+                q_rope_bnsd = q_rope_bsnd.transpose(1, 2).contiguous()
+                fias_v2_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                    q_nope_bnsd,
+                    c_kv_cache,
+                    c_kv_cache,
+                    query_rope=q_rope_bnsd,
+                    key_rope=k_rope_cache,
+                    num_query_heads=num_query_heads,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="BNSD",
+                    softmax_scale=layer.scaling,
+                    block_table=block_table,
+                    block_size=self.page_size,
+                    sparse_mode=3,
+                    atten_mask=self.mtp_mask,
+                    actual_seq_qlen=[query_seq_len] * batch_size,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
+                    pre_tokens=FULL_ATTENTION_WINDOW,
+                    next_tokens=0,
+                )
+                fias_v2_output = (
+                    fias_v2_output.transpose(1, 2)
+                    .contiguous()
+                    .reshape(-1, num_query_heads, self.kv_lora_rank)
+                )
+                fias_v2_bsnd_flat_output = None
+                if should_compare_fias_v2 and layer.tp_k_head_num == 1:
+                    fias_v2_bsnd_flat_output, _ = (
+                        torch_npu.npu_fused_infer_attention_score_v2(
+                            q_nope_bsnd,
+                            c_kv_cache.squeeze(1),
+                            c_kv_cache.squeeze(1),
+                            query_rope=q_rope_bsnd,
+                            key_rope=k_rope_cache.squeeze(1),
+                            num_query_heads=num_query_heads,
+                            num_key_value_heads=layer.tp_k_head_num,
+                            input_layout="BSND",
+                            softmax_scale=layer.scaling,
+                            block_table=block_table,
+                            block_size=self.page_size,
+                            sparse_mode=3,
+                            atten_mask=self.mtp_mask,
+                            actual_seq_qlen=[query_seq_len] * batch_size,
+                            actual_seq_kvlen=actual_seq_lengths_kv,
+                            pre_tokens=FULL_ATTENTION_WINDOW,
+                            next_tokens=0,
+                        )
+                    )
+                    fias_v2_bsnd_flat_output = fias_v2_bsnd_flat_output.reshape(
+                        -1, num_query_heads, self.kv_lora_rank
+                    )
+
+            # Parity mode always returns the v1 reference so the diagnostic
+            # itself cannot change speculative acceptance. It runs v2 only
+            # once, on the selected layer, and uses v1 directly elsewhere.
+            if not self.use_fias_v2_bsnd or self.debug_fias_v2_parity:
+                workspace = (
+                    torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                        q_nope,
+                        c_kv_cache,
+                        c_kv_cache,
+                        query_rope=q_rope,
+                        key_rope=k_rope_cache,
+                        num_heads=num_query_heads,
+                        num_key_value_heads=layer.tp_k_head_num,
+                        input_layout="TND",
+                        scale=layer.scaling,
+                        antiquant_mode=0,
+                        antiquant_scale=None,
+                        block_table=block_table,
+                        block_size=self.page_size,
+                        sparse_mode=3,
+                        atten_mask=self.mtp_mask,
+                        actual_seq_lengths=actual_seq_lengths,
+                        actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    )
+                )
+                attn_output = torch.empty_like(q_nope, dtype=q.dtype, device=q.device)
+                softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
+                torch_npu.npu_fused_infer_attention_score.out(
+                    q_nope,
+                    c_kv_cache,
+                    c_kv_cache,
+                    query_rope=q_rope,
+                    key_rope=k_rope_cache,
+                    num_heads=num_query_heads,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="TND",
+                    scale=layer.scaling,
+                    antiquant_mode=0,
+                    antiquant_scale=None,
+                    block_table=block_table,
+                    block_size=self.page_size,
+                    sparse_mode=3,
+                    atten_mask=self.mtp_mask,
+                    actual_seq_lengths=actual_seq_lengths,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    workspace=workspace,
+                    out=[attn_output, softmax_lse],
+                )
+                if should_compare_fias_v2:
+                    reference = attn_output[:, : layer.tp_q_head_num, :]
+                    reference_cpu = reference.float().cpu().reshape(-1)
+                    reference_norm = torch.linalg.vector_norm(reference_cpu)
+                    candidates = [("BNSD", fias_v2_output)]
+                    if fias_v2_bsnd_flat_output is not None:
+                        candidates.append(("BSND_FLAT", fias_v2_bsnd_flat_output))
+                    for layout, candidate_output in candidates:
+                        candidate = candidate_output[:, : layer.tp_q_head_num, :]
+                        candidate_cpu = candidate.float().cpu().reshape(-1)
+                        diff = candidate_cpu - reference_cpu
+                        candidate_norm = torch.linalg.vector_norm(candidate_cpu)
+                        cosine = torch.dot(reference_cpu, candidate_cpu) / (
+                            reference_norm * candidate_norm
+                        ).clamp_min(1e-12)
+                        logger.warning(
+                            "FIAS v2 parity layout=%s layer=%s shape=%s "
+                            "max_abs=%.8e mean_abs=%.8e rel_l2=%.8e "
+                            "cosine=%.10f reference_finite=%s "
+                            "candidate_finite=%s",
+                            layout,
+                            layer.layer_id,
+                            tuple(reference.shape),
+                            diff.abs().max().item(),
+                            diff.abs().mean().item(),
+                            (
+                                torch.linalg.vector_norm(diff)
+                                / reference_norm.clamp_min(1e-12)
+                            ).item(),
+                            cosine.item(),
+                            torch.isfinite(reference_cpu).all().item(),
+                            torch.isfinite(candidate_cpu).all().item(),
+                        )
+                    self.fias_v2_parity_checked = True
+            else:
+                attn_output = fias_v2_output
             attn_output = attn_output[:, : layer.tp_q_head_num, :]
             attn_output = attn_output.view(-1, layer.tp_q_head_num * layer.v_head_dim)
             if (

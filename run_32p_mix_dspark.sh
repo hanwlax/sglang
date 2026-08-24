@@ -7,7 +7,6 @@ sysctl -w kernel.sched_migration_cost_ns=50000
 
 MODEL_PATH=/home/weights/Kimi-K3-w4a8-int-moe
 DRAFT_MODEL_PATH=/home/weights/Kimi-K3-DSpark
-CUDA_GRAPH_BS="${CUDA_GRAPH_BS:-2 4 8 16}"
 
 unset https_proxy
 unset http_proxy
@@ -69,6 +68,14 @@ do
         export HCCL_OP_EXPANSION_MODE=AIV
         export HCCL_BUFFSIZE=200
         export DEEPEP_HCCL_BUFFSIZE=1800
+        export SGLANG_NPU_USE_MLAPO=0
+        export SGLANG_USE_FIA_NZ=0
+        # FIAS v1/v2 numerical parity diagnosis. The model continues with the
+        # v1 reference output; v2 is shadow-executed once at the exact DP batch.
+        export SGLANG_NPU_USE_FIAS_V2_BSND=1
+        export SGLANG_DEBUG_NPU_FIAS_V2_PARITY=1
+        export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER=3
+        export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE=8
 
         unset ASCEND_CUSTOM_OPP_PATH
         unset SGLANG_NPU_FUSED_MOE_MODE
@@ -92,14 +99,14 @@ do
 	          --enable-dp-attention --dp-size 4 --enable-dp-lm-head \
             --mem-fraction-static 0.75 \
             --max-mamba-cache-size 180 \
-            --chunked-prefill-size 16384 \
-            --cuda-graph-bs $CUDA_GRAPH_BS \
+            --chunked-prefill-size 20480 \
+            --disable-cuda-graph \
             --reasoning-parser kimi_k3 \
             --max-running-requests 64 \
             --host 0.0.0.0 \
             --port 30000 \
 	          --moe-a2a-backend deepep \
-            --deepep-mode auto \
+            --deepep-mode normal \
             --speculative-algorithm DSPARK \
             --speculative-draft-model-path "$DRAFT_MODEL_PATH" \
             --speculative-dspark-block-size 7 \
@@ -350,14 +357,16 @@ evalscope eval \
 
 
 # profiling
-curl --location 'http://127.0.0.1:30000/start_profile' \
-  --header 'Content-Type: application/json' \
-  --data '{
-    "output_dir": "/home/hanwlax/workspace/progress/kimi_k3/profiling/0819",
-    "num_steps": 10,
-    "profile_by_stage": true,
+curl -X POST http://127.0.0.1:30000/start_profile \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "output_dir": "/home/hanwlax/workspace/progress/kimi_k3/profiling/0820",
+    "activities": ["CPU", "GPU"],
+    "num_steps": 18,
+    "profile_by_stage": false,
     "with_stack": false,
-    "profile_prefix": "128k_1k_bs32_hit_cache_conv_to_track_triton"
+    "record_shapes": true,
+    "profile_prefix": "k3_c32_steady_decode"
   }'
 
 curl --location 'http://127.0.0.1:30000/stop_profile'

@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -153,6 +154,47 @@ class SchedulerProfilerManager:
 
         return ProfileReqOutput(success=True, message="Succeeded")
 
+    def _create_npu_trace_handler(self):
+        raw_prefix = self.profile_prefix or "profile"
+        folder_prefix = "".join(
+            char if char.isalnum() or char in "-_." else "_"
+            for char in raw_prefix
+        ).strip(".")
+        folder_prefix = folder_prefix or "profile"
+        worker_name = f"{folder_prefix}_{self.ps.dp_rank}_{self.ps.tp_rank}"
+        base_handler = torch_npu.profiler.tensorboard_trace_handler(
+            str(self.torch_profiler_output_dir), worker_name=worker_name
+        )
+
+        def handler(prof_inst) -> None:
+            base_handler(prof_inst)
+            source_dir = Path(prof_inst.prof_if.prof_path)
+            if not source_dir.is_dir():
+                logger.warning(
+                    "Cannot rename NPU profile directory because it does not exist: %s",
+                    source_dir,
+                )
+                return
+
+            timestamp = datetime.now().astimezone().strftime("%Y%m%d%H%M%S%f")[:-3]
+            target_dir = source_dir.parent / (
+                f"{folder_prefix}_{self.ps.dp_rank}_{self.ps.tp_rank}_{timestamp}"
+            )
+            try:
+                source_dir.rename(target_dir)
+            except OSError:
+                logger.exception(
+                    "Failed to rename NPU profile directory from %s to %s",
+                    source_dir,
+                    target_dir,
+                )
+                return
+
+            prof_inst.prof_if.prof_path = str(target_dir)
+            logger.info("Renamed NPU profile directory to: %s", target_dir)
+
+        return handler
+
     def _start_profile(
         self, stage: Optional[ForwardMode] = None
     ) -> ProfileReqOutput | None:
@@ -219,14 +261,17 @@ class SchedulerProfilerManager:
         elif torchprof_activities:
             self.torch_profiler = torch.profiler.profile(
                 activities=torchprof_activities,
+                schedule=(
+                    (lambda _: torch_npu.profiler.ProfilerAction.RECORD)
+                    if _is_npu
+                    else None
+                ),
                 with_stack=with_stack if with_stack is not None else True,
                 record_shapes=record_shapes if record_shapes is not None else False,
                 on_trace_ready=(
                     None
                     if not _is_npu
-                    else torch_npu.profiler.tensorboard_trace_handler(
-                        str(self.torch_profiler_output_dir)
-                    )
+                    else self._create_npu_trace_handler()
                 ),
                 experimental_config=(
                     None
@@ -388,6 +433,12 @@ class SchedulerProfilerManager:
         self.profiler_start_forward_ct = None
 
         return ProfileReqOutput(success=True, message=f"Succeeded.{merge_message}")
+
+    def _profile_batch_step(self) -> None:
+        if envs.SGLANG_PROFILE_V2.get():
+            return
+        if self.profile_in_progress and self.torch_profiler is not None:
+            self.torch_profiler.step()
 
     def _profile_batch_predicate(self, batch: ScheduleBatch):
         if envs.SGLANG_PROFILE_V2.get():

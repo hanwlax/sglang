@@ -1743,6 +1743,7 @@ class Scheduler(
             # Launch the current batch
             if batch:
                 result = self.run_batch(batch)
+                self.profiler_manager._profile_batch_step()
                 self.process_batch_result(batch, result)
             else:
                 # When the server is idle, do self-check and re-init some states.
@@ -1835,6 +1836,7 @@ class Scheduler(
                         self.custom_npu_profiler_active and is_prof_stage
                     )
                 batch_result = self.run_batch(batch)
+                self.profiler_manager._profile_batch_step()
                 # Fence result processing behind this forward's shared reads.
                 self._apply_war_barrier()
                 self.result_queue.append((batch.copy(), batch_result))
