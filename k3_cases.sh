@@ -12,6 +12,7 @@ HOST="127.0.0.1"
 PORT="30000"
 DEFAULT_DATASET="/home/zkk/datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
 SHARED_128K_DATASET="/home/hanwlax/datasets/shareGPT/sharegpt_natural_shared_128k_32.json"
+SHARED_128K_64_DATASET="/home/hanwlax/datasets/shareGPT/sharegpt_natural_shared_128k_64.json"
 
 CASE_NAMES=(
   "gsm8k"
@@ -23,6 +24,7 @@ CASE_NAMES=(
   "128k_1k_99cache_bs4"
   "128k_1k_99cache_bs32"
   "gpqa"
+  "128k_1k_99cache_bs44"
 )
 
 usage() {
@@ -177,6 +179,16 @@ run_case() {
         }' \
         --eval-batch-size 32 \
         --seed 42
+      ;;
+    9)
+      flush_cache
+      echo "Building 99% prefix cache..."
+      run_random_benchmark "$SHARED_128K_64_DATASET" 4 126720 1 4 \
+        --seed 42 --warmup-requests 0
+      echo "Running benchmark..."
+      run_random_benchmark "$SHARED_128K_64_DATASET" 44 128000 1000 44 \
+        --seed 42 --warmup-requests 0 --cache-report \
+        --output-details --output-file "$DETAIL_FILE"
       ;;
   esac
 }

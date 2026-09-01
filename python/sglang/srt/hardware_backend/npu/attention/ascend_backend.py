@@ -2074,7 +2074,7 @@ class AscendAttnBackend(AttentionBackend):
                 mask = self.mtp_mask
                 sparse_mode = 4 if is_swa_layer else 3
 
-            if self.is_hybrid_swa:
+            if self.is_hybrid_swa or self.use_fias_v2_bsnd:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                     query,
                     k_cache,
@@ -2285,7 +2285,12 @@ class AscendAttnBackend(AttentionBackend):
                     "--disable-cuda-graph so it can inspect real eager outputs."
                 )
 
-            run_fias_v2 = self.use_fias_v2_bsnd and (
+            # torch_npu's NPUGraph IFA v2 handler captures the out variant and
+            # updates actual_seq_kvlen before every replay. The NPU graph runners
+            # select that update key when this backend is used, so graph replay
+            # can use v2 without freezing the capture-time KV lengths.
+            use_fias_v2_this_forward = self.use_fias_v2_bsnd
+            run_fias_v2 = use_fias_v2_this_forward and (
                 not self.debug_fias_v2_parity or should_compare_fias_v2
             )
             fias_v2_output = None
@@ -2368,7 +2373,7 @@ class AscendAttnBackend(AttentionBackend):
             # itself cannot change speculative acceptance. It runs v2 only
             # once, on the selected layer, and uses v1 directly elsewhere.
             if (
-                not self.use_fias_v2_bsnd
+                not use_fias_v2_this_forward
                 and not self.use_triton_paged_attention_decode
             ) or self.debug_fias_v2_parity:
                 workspace = (
@@ -2419,6 +2424,29 @@ class AscendAttnBackend(AttentionBackend):
                     reference = attn_output[:, : layer.tp_q_head_num, :]
                     reference_cpu = reference.float().cpu().reshape(-1)
                     reference_norm = torch.linalg.vector_norm(reference_cpu)
+                    logger.warning(
+                        "FIAS v2 parity inputs layer=%s batch_size=%s "
+                        "query_seq_len=%s kv_len_min=%s kv_len_max=%s "
+                        "q_heads=%s padded_q_heads=%s kv_heads=%s "
+                        "head_dim=%s page_size=%s block_table_shape=%s "
+                        "kv_cache_shape=%s mask_shape=%s sparse_mode=3 "
+                        "pre_tokens=%s next_tokens=0 scale=%.10e",
+                        layer.layer_id,
+                        batch_size,
+                        query_seq_len,
+                        min(actual_seq_lengths_kv),
+                        max(actual_seq_lengths_kv),
+                        layer.tp_q_head_num,
+                        num_query_heads,
+                        layer.tp_k_head_num,
+                        self.kv_lora_rank,
+                        self.page_size,
+                        tuple(block_table.shape),
+                        tuple(c_kv_cache.shape),
+                        tuple(self.mtp_mask.shape),
+                        FULL_ATTENTION_WINDOW,
+                        layer.scaling,
+                    )
                     candidates = [("BNSD", fias_v2_output)]
                     if fias_v2_bsnd_flat_output is not None:
                         candidates.append(("BSND_FLAT", fias_v2_bsnd_flat_output))
@@ -2427,14 +2455,36 @@ class AscendAttnBackend(AttentionBackend):
                         candidate_cpu = candidate.float().cpu().reshape(-1)
                         diff = candidate_cpu - reference_cpu
                         candidate_norm = torch.linalg.vector_norm(candidate_cpu)
+                        worst_flat_index = (
+                            torch.nan_to_num(
+                                diff.abs(),
+                                nan=float("inf"),
+                                posinf=float("inf"),
+                                neginf=float("inf"),
+                            )
+                            .argmax()
+                            .item()
+                        )
+                        worst_dim = worst_flat_index % self.kv_lora_rank
+                        worst_head = (
+                            worst_flat_index // self.kv_lora_rank
+                        ) % layer.tp_q_head_num
+                        worst_token = worst_flat_index // (
+                            self.kv_lora_rank * layer.tp_q_head_num
+                        )
+                        worst_batch = worst_token // query_seq_len
+                        worst_query_index = worst_token % query_seq_len
                         cosine = torch.dot(reference_cpu, candidate_cpu) / (
                             reference_norm * candidate_norm
                         ).clamp_min(1e-12)
                         logger.warning(
                             "FIAS v2 parity layout=%s layer=%s shape=%s "
                             "max_abs=%.8e mean_abs=%.8e rel_l2=%.8e "
-                            "cosine=%.10f reference_finite=%s "
-                            "candidate_finite=%s",
+                            "cosine=%.10f reference_norm=%.8e "
+                            "candidate_norm=%.8e reference_abs_max=%.8e "
+                            "candidate_abs_max=%.8e worst_index=(%s,%s,%s,%s) "
+                            "worst_reference=%.8e worst_candidate=%.8e "
+                            "reference_finite=%s candidate_finite=%s",
                             layout,
                             layer.layer_id,
                             tuple(reference.shape),
@@ -2445,6 +2495,16 @@ class AscendAttnBackend(AttentionBackend):
                                 / reference_norm.clamp_min(1e-12)
                             ).item(),
                             cosine.item(),
+                            reference_norm.item(),
+                            candidate_norm.item(),
+                            reference_cpu.abs().max().item(),
+                            candidate_cpu.abs().max().item(),
+                            worst_batch,
+                            worst_query_index,
+                            worst_head,
+                            worst_dim,
+                            reference_cpu[worst_flat_index].item(),
+                            candidate_cpu[worst_flat_index].item(),
                             torch.isfinite(reference_cpu).all().item(),
                             torch.isfinite(candidate_cpu).all().item(),
                         )
@@ -2615,6 +2675,32 @@ class AscendAttnBackend(AttentionBackend):
                 actual_seq_len_kv = seq_lens_cpu_int.cpu().int().tolist()
 
             num_tokens = query.shape[0]
+            if self.use_fias_v2_bsnd and not self._is_swa_layer(layer):
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                    q.view(
+                        num_tokens,
+                        1,
+                        layer.tp_q_head_num,
+                        layer.qk_head_dim,
+                    ),
+                    k_cache,
+                    v_cache,
+                    block_table=block_tables,
+                    block_size=self.page_size,
+                    num_query_heads=layer.tp_q_head_num,
+                    num_key_value_heads=layer.tp_k_head_num,
+                    input_layout="BSND",
+                    softmax_scale=layer.scaling,
+                    actual_seq_qlen=[1] * len(actual_seq_len_kv),
+                    actual_seq_kvlen=actual_seq_len_kv,
+                    sparse_mode=0,
+                    pre_tokens=FULL_ATTENTION_WINDOW,
+                    next_tokens=0,
+                )
+                return attn_output.view(
+                    num_tokens, layer.tp_q_head_num * layer.v_head_dim
+                )
+
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query,
                 k_cache,

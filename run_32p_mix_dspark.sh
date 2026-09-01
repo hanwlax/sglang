@@ -7,6 +7,8 @@ sysctl -w kernel.sched_migration_cost_ns=50000
 
 MODEL_PATH=/home/weights/Kimi-K3-w4a8-int-moe
 DRAFT_MODEL_PATH=/home/weights/Kimi-K3-DSpark
+CUDA_GRAPH_BS="${CUDA_GRAPH_BS:-2 4 8 9 11 16}"
+CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-20480}"
 
 unset https_proxy
 unset http_proxy
@@ -23,18 +25,65 @@ export SGLANG_NPU_PROFILING_PATH="/home/hanwlax/workspace/progress/kimi_k3/profi
 
 # A/B
 export SGLANG_USE_RECOMPUTE_BEFORE=0  # 优化前算子：1
-export SGLANG_KDA_USE_CONV_STATE_TRACK_COPY=1  # 使用算子做COPY：1
-export USE_PHYSICS_GRID=0  # 使用物理分核：1
-# FIAS V1
-export SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE=0
-export SGLANG_NPU_USE_FIAS_V2_BSND=0
-export SGLANG_DEBUG_NPU_FIAS_V2_PARITY=0
+export SGLANG_KDA_USE_CONV_STATE_TRACK_COPY="${SGLANG_KDA_USE_CONV_STATE_TRACK_COPY:-1}"  # 使用算子做COPY：1
+export USE_PHYSICS_GRID="${USE_PHYSICS_GRID:-0}"  # 使用物理分核：1
+# FIAS target-verify backend and numerical parity diagnosis.
+export SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE="${SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE:-0}"
+export SGLANG_DEBUG_NPU_FIAS_V2_PARITY="${SGLANG_DEBUG_NPU_FIAS_V2_PARITY:-0}"
+export SGLANG_NPU_USE_FIAS_V2_BSND="${SGLANG_NPU_USE_FIAS_V2_BSND:-${SGLANG_DEBUG_NPU_FIAS_V2_PARITY}}"
+export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER="${SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER:-3}"
+export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE="${SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE:-8}"
+FORCE_EAGER="${FORCE_EAGER:-0}"
+ALLOW_FIAS_V2_CUDA_GRAPH="${ALLOW_FIAS_V2_CUDA_GRAPH:-1}"
+
+if [[ "${FORCE_EAGER}" != "0" && "${FORCE_EAGER}" != "1" ]]; then
+    echo "FORCE_EAGER must be 0 or 1, got: ${FORCE_EAGER}" >&2
+    exit 2
+fi
+
+if [[ "${ALLOW_FIAS_V2_CUDA_GRAPH}" != "0" && "${ALLOW_FIAS_V2_CUDA_GRAPH}" != "1" ]]; then
+    echo "ALLOW_FIAS_V2_CUDA_GRAPH must be 0 or 1, got: ${ALLOW_FIAS_V2_CUDA_GRAPH}" >&2
+    exit 2
+fi
+
+if [[ "${SGLANG_DEBUG_NPU_FIAS_V2_PARITY}" == "1" ]]; then
+    if [[ "${SGLANG_NPU_USE_FIAS_V2_BSND}" != "1" ]]; then
+        echo "FIAS v2 parity requires SGLANG_NPU_USE_FIAS_V2_BSND=1" >&2
+        exit 2
+    fi
+    if [[ "${SGLANG_NPU_USE_TRITON_PAGED_ATTENTION_DECODE}" == "1" ]]; then
+        echo "FIAS v2 parity is incompatible with Triton paged attention" >&2
+        exit 2
+    fi
+fi
+
+FIAS_V2_GRAPH_GUARD=0
+if [[ "${SGLANG_NPU_USE_FIAS_V2_BSND}" == "1" && "${ALLOW_FIAS_V2_CUDA_GRAPH}" != "1" ]]; then
+    FIAS_V2_GRAPH_GUARD=1
+    echo "FIAS v2 CUDA Graph is disabled: GSM8K regressed with Graph but passed in eager mode. Set ALLOW_FIAS_V2_CUDA_GRAPH=1 only for debugging." >&2
+fi
+
+if [[ "${SGLANG_DEBUG_NPU_FIAS_V2_PARITY}" == "1" || "${FORCE_EAGER}" == "1" || "${FIAS_V2_GRAPH_GUARD}" == "1" ]]; then
+    DEEPEP_MODE=normal
+    GRAPH_ARGS=(--disable-cuda-graph)
+    WARMUP_ARGS=()
+else
+    DEEPEP_MODE="${DEEPEP_MODE:-auto}"
+    read -r -a CUDA_GRAPH_BS_ARRAY <<< "${CUDA_GRAPH_BS}"
+    GRAPH_ARGS=(--cuda-graph-bs "${CUDA_GRAPH_BS_ARRAY[@]}")
+    WARMUP_ARGS=(--skip-server-warmup)
+fi
 
 # PYTHONPATH
-CODEPATH="/home/hanwlax/test-codes/k3"
-SGLANG_PATH="${CODEPATH}/sglang/python"
+SGLANG_REPO_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CODEPATH="$(dirname -- "${SGLANG_REPO_PATH}")"
+SGLANG_PATH="${SGLANG_REPO_PATH}/python"
 SGLANG_KERNEL_PATH="${CODEPATH}/sgl-kernel-npu/python/sgl_kernel_npu"
 export PYTHONPATH="${SGLANG_PATH}:${SGLANG_KERNEL_PATH}:${PYTHONPATH:-}"
+
+echo "SGLang repo: ${SGLANG_REPO_PATH}"
+echo "FIAS v2: use=${SGLANG_NPU_USE_FIAS_V2_BSND} parity=${SGLANG_DEBUG_NPU_FIAS_V2_PARITY} layer=${SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER} local_bs=${SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE}"
+echo "Runtime mode: force_eager=${FORCE_EAGER} fias_v2_graph_guard=${FIAS_V2_GRAPH_GUARD} allow_fias_v2_graph=${ALLOW_FIAS_V2_CUDA_GRAPH} deepep=${DEEPEP_MODE} graph_args=${GRAPH_ARGS[*]} warmup_args=${WARMUP_ARGS[*]:-(enabled)}"
 
 D_IP=('192.168.25.209' '192.168.25.212' '192.168.25.216' '192.168.25.217')
 LOCAL_HOST1=`hostname -I|awk -F " " '{print$1}'`
@@ -74,11 +123,6 @@ do
         export DEEPEP_HCCL_BUFFSIZE=1800
         export SGLANG_NPU_USE_MLAPO=0
         export SGLANG_USE_FIA_NZ=0
-        # FIAS v1/v2 numerical parity diagnosis. The model continues with the
-        # v1 reference output; v2 is shadow-executed once at the exact DP batch.
-        export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_LAYER=3
-        export SGLANG_DEBUG_NPU_FIAS_V2_PARITY_BATCH_SIZE=8
-
         unset ASCEND_CUSTOM_OPP_PATH
         unset SGLANG_NPU_FUSED_MOE_MODE
         unset ENABLE_PROFILING
@@ -101,14 +145,15 @@ do
 	          --enable-dp-attention --dp-size 4 --enable-dp-lm-head \
             --mem-fraction-static 0.75 \
             --max-mamba-cache-size 180 \
-            --chunked-prefill-size 20480 \
-            --disable-cuda-graph \
+            --chunked-prefill-size "$CHUNKED_PREFILL_SIZE" \
+            "${GRAPH_ARGS[@]}" \
             --reasoning-parser kimi_k3 \
             --max-running-requests 64 \
             --host 0.0.0.0 \
             --port 30000 \
+            "${WARMUP_ARGS[@]}" \
 	          --moe-a2a-backend deepep \
-            --deepep-mode normal \
+            --deepep-mode "$DEEPEP_MODE" \
             --speculative-algorithm DSPARK \
             --speculative-draft-model-path "$DRAFT_MODEL_PATH" \
             --speculative-dspark-block-size 7 \
@@ -294,7 +339,7 @@ python -m sglang.bench_serving \
 # 128k_1k_99cache_bs32(on 209)
 curl --location 'http://127.0.0.1:30000/flush_cache' --header 'Content-Type: application/json'
 python -m sglang.bench_serving \
-  --dataset-path /home/hanwlax/datasets/shareGPT/sharegpt_natural_shared_128k_32.json \
+  --dataset-path /home/hanwlax/datasets/shareGPT/sharegpt_natural_shared_128k_64.json \
   --dataset-name random \
   --backend sglang \
   --host 127.0.0.1 \
@@ -308,24 +353,24 @@ python -m sglang.bench_serving \
   --warmup-requests 0
 
 date_str=$(date +%Y-%m-%d_%H-%M-%S)
-mkdir -p "/home/hanwlax/workspace/progress/kimi_k3/bench_serving_logs/128k_1k_bs32_${date_str}"
+mkdir -p "/home/hanwlax/workspace/progress/kimi_k3/bench_serving_logs/128k_1k_bs44_${date_str}"
 python -m sglang.bench_serving \
-  --dataset-path /home/hanwlax/datasets/shareGPT/sharegpt_natural_shared_128k_32.json \
+  --dataset-path /home/hanwlax/datasets/shareGPT/sharegpt_natural_shared_128k_64.json \
   --dataset-name random \
   --backend sglang \
   --host 127.0.0.1 \
   --port 30000 \
-  --max-concurrency 32 \
+  --max-concurrency 44 \
   --random-input-len 128000 \
   --random-output-len 1000 \
-  --num-prompts 32 \
+  --num-prompts 44 \
   --random-range-ratio 1 \
   --seed 42 \
   --warmup-requests 0 \
   --cache-report \
   --output-details \
-  --output-file "/home/hanwlax/workspace/progress/kimi_k3/bench_serving_logs/128k_1k_bs32_${date_str}/details.jsonl" \
-  2>&1 | tee "/home/hanwlax/workspace/progress/kimi_k3/bench_serving_logs/128k_1k_bs32_${date_str}/run.log"
+  --output-file "/home/hanwlax/workspace/progress/kimi_k3/bench_serving_logs/128k_1k_bs44_${date_str}/details.jsonl" \
+  2>&1 | tee "/home/hanwlax/workspace/progress/kimi_k3/bench_serving_logs/128k_1k_bs44_${date_str}/run.log"
 
 
 # gpqa

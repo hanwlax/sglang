@@ -205,6 +205,11 @@ def layer_norm_gated_fwd(
         else None
     )
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
+    if T == 0:
+        # DP-attention idle ranks still execute the model to participate in
+        # collectives. Preserve the normal output contract for their empty
+        # local token batch without launching a zero-grid Triton kernel.
+        return y, mean, rstd, residual_out if residual_out is not None else x
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BD = min(MAX_FUSED_SIZE, next_power_of_2(D))

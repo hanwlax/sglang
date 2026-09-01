@@ -23,6 +23,7 @@ from sglang.srt.configs.model_config import (
     is_deepseek_dsa,
     is_deepseek_v4,
 )
+from sglang.srt.environ import envs
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
 )
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 class EAGLEDraftNpuGraphRunner(EAGLEDraftCudaGraphRunner):
     def __init__(self, eagle_worker: EagleDraftWorker):
+        self.use_fias_v2_bsnd = envs.SGLANG_NPU_USE_FIAS_V2_BSND.get()
         self._init_arch_map()
         super().__init__(eagle_worker)
 
@@ -41,19 +43,25 @@ class EAGLEDraftNpuGraphRunner(EAGLEDraftCudaGraphRunner):
         self.attr_name: Dict[str, str] = {
             AttentionArch.MLA: "actual_seq_lengths_kv",
             AttentionArch.MHA: "context_lens",
+            "FIAS_V2": "actual_seq_kvlen",
         }
         self.attr_type: Dict[str, Union[list, torch.Tensor]] = {
             AttentionArch.MLA: [],
             AttentionArch.MHA: torch.Tensor(),
+            "FIAS_V2": [],
         }
 
     def _cache_loc_dtype(self):
         return torch.int32
 
     def _get_update_attr_name(self):
+        if self.use_fias_v2_bsnd:
+            return self.attr_name["FIAS_V2"]
         return self.attr_name[AttentionArch.MLA]
 
     def _get_update_attr_type(self):
+        if self.use_fias_v2_bsnd:
+            return self.attr_type["FIAS_V2"]
         return self.attr_type[AttentionArch.MLA]
 
     def can_run_graph(self, forward_batch: ForwardBatch):
