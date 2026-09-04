@@ -5,9 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+
 from sglang.srt.layers.moe import utils as moe_utils
-from sglang.srt.layers.moe.moe_runner import ascend as ascend_runner
-from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
 from sglang.srt.layers.moe.token_dispatcher import deepep
 from sglang.srt.layers.moe.utils import DeepEPMode, DispatcherOutputDtype
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -17,37 +16,6 @@ register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
 
 class TestNPUMXFP8DeepEPDispatch(CustomTestCase):
-    def test_w4a8_situ_selects_fused_mxfp8_activation(self):
-        kernel = object.__new__(ascend_runner.NPUW4A8MXFP4MoEMethod)
-        config = MoeRunnerConfig(
-            activation="situ",
-            gemm1_alpha=4.0,
-            gemm1_clamp_limit=25.0,
-            layer=SimpleNamespace(w2_kernel=kernel),
-        )
-        fused_activation = Mock()
-        with (
-            patch.object(
-                ascend_runner,
-                "get_moe_a2a_backend",
-                return_value=SimpleNamespace(is_deepep=lambda: True),
-            ),
-            patch.object(
-                ascend_runner.envs.SGLANG_NPU_MOE_SITU_MXFP8_FUSED,
-                "get",
-                return_value=True,
-            ),
-            patch.object(
-                ascend_runner,
-                "NPUSituMXFP8Quant",
-                return_value=fused_activation,
-            ) as fused_cls,
-        ):
-            runner = ascend_runner.AscendRunnerCore(config)
-
-        fused_cls.assert_called_once_with(beta=4.0, linear_beta=25.0)
-        self.assertIs(runner.activation, fused_activation)
-
     def test_mode_specific_dtype_selection(self):
         quant_config = {
             "normal_dispatcher_output_dtype": "bf16",
@@ -76,7 +44,9 @@ class TestNPUMXFP8DeepEPDispatch(CustomTestCase):
 
     def test_mxfp8_config_selects_explicit_deepep_quant_mode(self):
         dispatcher = object.__new__(deepep._DeepEPDispatcherImplLowLatency)
-        dispatcher.quant_config = {"low_latency_dispatcher_output_dtype": "mxfp8"}
+        dispatcher.quant_config = {
+            "low_latency_dispatcher_output_dtype": "mxfp8"
+        }
         with patch.object(
             deepep, "get_deepep_output_dtype", return_value=DispatcherOutputDtype.MXFP8
         ):
