@@ -99,8 +99,11 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         self.qk_rope_head_dim = qk_rope_head_dim  # 64
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
-        self.q_b_proj_weight_scale = self.q_b_proj.weight_scale.view(1, -1).to(
-            torch.float
+        q_b_proj_weight_scale = getattr(self.q_b_proj, "weight_scale", None)
+        self.q_b_proj_weight_scale = (
+            q_b_proj_weight_scale.view(1, -1).to(torch.float)
+            if q_b_proj_weight_scale is not None
+            else None
         )
 
     def preprocess_weights(self, hidden_states):
@@ -429,6 +432,11 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         )
 
     def forward_mlaprolog(self, positions, hidden_states, forward_batch):
+        if self.q_b_proj_weight_scale is None:
+            raise RuntimeError(
+                "MLA prolog requires q_b_proj.weight_scale, but the current "
+                "q_b_proj quantization format does not provide it."
+            )
         if not self.has_preprocess_weights:
             self.mlaprolog_preprocess_weight()
             self.has_preprocess_weights = True

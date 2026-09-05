@@ -4,21 +4,63 @@ Unit tests for sglang.srt.hardware_backend.npu.attention.mla_preprocess.
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from sglang.test.ci.ci_register import register_npu_ci
+from sglang.test.test_utils import CustomTestCase
 
 register_npu_ci(est_time=4, suite="stage-a-unit-test-npu")
 
 from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
+    NPUFusedMLAPreprocess,
     is_fia_nz,
     is_mla_preprocess_enabled,
     round_up,
     trans_rope_weight,
     transdata,
 )
+
+
+class TestNPUFusedMLAPreprocessInit(CustomTestCase):
+    def _create_module(self, q_b_proj):
+        return NPUFusedMLAPreprocess(
+            fused_qkv_a_proj_with_mqa=SimpleNamespace(),
+            q_a_layernorm=SimpleNamespace(),
+            kv_a_layernorm=SimpleNamespace(hidden_size=512),
+            q_b_proj=q_b_proj,
+            w_kc=torch.empty(1),
+            rotary_emb=SimpleNamespace(),
+            layer_id=0,
+            num_local_heads=8,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=512,
+        )
+
+    def test_missing_q_b_proj_weight_scale_is_allowed(self):
+        module = self._create_module(SimpleNamespace(input_size=1536))
+
+        self.assertIsNone(module.q_b_proj_weight_scale)
+
+    def test_mla_prolog_rejects_missing_q_b_proj_weight_scale(self):
+        module = self._create_module(SimpleNamespace(input_size=1536))
+
+        with self.assertRaisesRegex(RuntimeError, "requires q_b_proj.weight_scale"):
+            module.forward_mlaprolog(None, None, None)
+
+    def test_q_b_proj_weight_scale_is_prepared_for_mla_prolog(self):
+        module = self._create_module(
+            SimpleNamespace(
+                input_size=1536,
+                weight_scale=torch.tensor([1.0, 2.0], dtype=torch.float16),
+            )
+        )
+
+        self.assertEqual(module.q_b_proj_weight_scale.shape, (1, 2))
+        self.assertEqual(module.q_b_proj_weight_scale.dtype, torch.float32)
 
 
 class TestRoundUp(unittest.TestCase):
