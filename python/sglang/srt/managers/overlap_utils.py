@@ -202,7 +202,12 @@ class ConfidenceRelay(msgspec.Struct):
         self.confidence_buf[indices] = confidence.to(self.confidence_buf.dtype)
 
     def issue_ring_copy(self, *, stream, publish_ready) -> None:
-        if not self.initialized or stream is None or publish_ready is None:
+        if (
+            not self.initialized
+            or self.conf_ring is None
+            or stream is None
+            or publish_ready is None
+        ):
             return
         slot = self.ring_pos % CONFIDENCE_RELAY_RING_DEPTH
         stream.wait_event(publish_ready)
@@ -224,7 +229,9 @@ class ConfidenceRelay(msgspec.Struct):
         if fi is None or fi.shape[0] == 0:
             return None
 
-        if stream is None or publish_ready is None:
+        # A backend can have a private sequence-length stream without a
+        # confidence ring. Preserve its synchronous confidence policy.
+        if self.conf_ring is None or stream is None or publish_ready is None:
             idx = batch.req_pool_indices
             idx_cpu = batch.req_pool_indices_cpu
             return ResolvedConfidence(
@@ -284,10 +291,10 @@ class FutureMap:
                 (self.req_pool_size,), dtype=torch.int64, device=self.device
             )
         # Pinned host copy of new_seq_lens_buf + private stream for fwd-prepare
-        # D2H pulls (gated only on publish, off the schedule stream). CUDA-only:
-        # recovers occupancy lost to the WAR barrier (also CUDA-only); other
-        # platforms have no barrier and use the plain .cpu() bootstrap path.
-        if _is_cuda:
+        # D2H pulls (gated only on publish, off the schedule stream). CUDA and
+        # NPU both need this path: Ascend consumes exact CPU lengths before the
+        # next forward, and .cpu() would also wait for preceding schedule work.
+        if _is_cuda or _is_npu:
             self.new_seq_lens_cpu_pinned = torch.empty(
                 (self.req_pool_size,), dtype=torch.int64, pin_memory=True
             )
@@ -494,7 +501,7 @@ class FutureMap:
             return
 
         if self.fwd_prepare_d2h_stream is None or self.publish_ready is None:
-            batch.seq_lens_cpu = batch.seq_lens.cpu()  # bootstrap / non-CUDA
+            batch.seq_lens_cpu = batch.seq_lens.cpu()  # bootstrap / no private stream
             batch.seq_lens_sum = int(batch.seq_lens_cpu.sum())
             if _DEBUG_ASSERT:
                 _assert_nonneg_and_invalidate(batch.seq_lens, self.new_seq_lens_buf, fi)
