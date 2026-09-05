@@ -62,6 +62,20 @@ class TestNPUFusedMLAPreprocessInit(CustomTestCase):
         self.assertEqual(module.q_b_proj_weight_scale.shape, (1, 2))
         self.assertEqual(module.q_b_proj_weight_scale.dtype, torch.float32)
 
+    def test_skip_rope_uses_identity_for_nonzero_layer(self):
+        module = self._create_module(SimpleNamespace(input_size=1536))
+        module.layer_id = 13
+        module.dtype = torch.float16
+        module.rotary_emb = None
+
+        cos, sin = module.get_forward_sin_cos(torch.tensor([5, 17]))
+
+        self.assertEqual(cos.shape, (2, 64))
+        self.assertEqual(sin.shape, (2, 64))
+        self.assertEqual(cos.dtype, torch.float16)
+        self.assertTrue(torch.equal(cos, torch.ones_like(cos)))
+        self.assertTrue(torch.equal(sin, torch.zeros_like(sin)))
+
 
 class TestRoundUp(unittest.TestCase):
     def test_exact_multiple(self):

@@ -253,11 +253,26 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         self.kv_a_proj_weight = npu_format_cast(qkv_a_proj_weight_kv)
 
     def get_sin_cos(self, positions):
+        if self.rotary_emb is None:
+            shape = (*positions.shape, self.qk_rope_head_dim)
+            return (
+                torch.ones(shape, dtype=self.dtype, device=positions.device),
+                torch.zeros(shape, dtype=self.dtype, device=positions.device),
+            )
         cos_sin = self.rotary_emb.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         cos = cos.repeat(1, 2)
         sin = sin.repeat(1, 2)
         return cos, sin
+
+    def get_forward_sin_cos(self, positions):
+        if self.rotary_emb is None or self.layer_id == 0:
+            cos, sin = self.get_sin_cos(positions)
+            if self.rotary_emb is not None:
+                self.rotary_emb.cos_cached = cos
+                self.rotary_emb.sin_cache = sin
+            return cos, sin
+        return self.rotary_emb.cos_cached, self.rotary_emb.sin_cache
 
     def get_kv_cache_and_cache_idx(self, forward_batch):
         k_cache, v_cache = get_token_to_kv_pool().get_kv_buffer(self.layer_id)
@@ -273,11 +288,7 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
     ):
         bsz, _ = hidden_states.view(-1, hidden_states.shape[-1]).shape
         self.dtype = hidden_states.dtype
-        if self.layer_id == 0:
-            self.cos, self.sin = self.get_sin_cos(positions)
-            self.rotary_emb.cos_cached, self.rotary_emb.sin_cache = self.cos, self.sin
-        else:
-            self.cos, self.sin = self.rotary_emb.cos_cached, self.rotary_emb.sin_cache
+        self.cos, self.sin = self.get_forward_sin_cos(positions)
 
         self.kvCache, self.kvCacheRope, self.slotmapping = (
             self.get_kv_cache_and_cache_idx(forward_batch)
@@ -352,11 +363,7 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
             self.has_preprocess_weights = True
             self.dtype = hidden_states.dtype
 
-        if self.layer_id == 0:
-            cos, sin = self.get_sin_cos(positions)
-            self.rotary_emb.cos_cached, self.rotary_emb.sin_cache = cos, sin
-        else:
-            cos, sin = self.rotary_emb.cos_cached, self.rotary_emb.sin_cache
+        cos, sin = self.get_forward_sin_cos(positions)
 
         k_cache, v_cache, slot_mapping = self.get_kv_cache_and_cache_idx(forward_batch)
 
