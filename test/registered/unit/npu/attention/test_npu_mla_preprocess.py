@@ -5,7 +5,7 @@ Unit tests for sglang.srt.hardware_backend.npu.attention.mla_preprocess.
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -21,6 +21,9 @@ from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
     round_up,
     trans_rope_weight,
     transdata,
+)
+from sglang.srt.hardware_backend.npu.modules.deepseek_v2_attention_mla_npu import (
+    forward_mla_prepare_npu,
 )
 
 
@@ -87,6 +90,55 @@ class TestNPUFusedMLAPreprocessInit(CustomTestCase):
 
         self.assertEqual(kv_cache.shape, (3, 128, 1, 512))
         self.assertEqual(kv_rope_cache.shape, (3, 128, 1, 64))
+
+
+class TestForwardMlaPrepareNpu(CustomTestCase):
+    @patch(
+        "sglang.srt.hardware_backend.npu.modules.deepseek_v2_attention_mla_npu."
+        "is_mla_preprocess_enabled",
+        return_value=True,
+    )
+    @patch(
+        "sglang.srt.hardware_backend.npu.modules.deepseek_v2_attention_mla_npu."
+        "NPUFusedMLAPreprocess"
+    )
+    def test_passes_v_head_dim_before_quant_config(
+        self, preprocess_cls, _is_mla_preprocess_enabled
+    ):
+        preprocess = MagicMock()
+        preprocess.forward.return_value = (1, 2, 3, 4, 5, 6, 7)
+        preprocess_cls.return_value = preprocess
+        model = SimpleNamespace(
+            fused_qkv_a_proj_with_mqa=object(),
+            q_a_layernorm=object(),
+            kv_a_layernorm=object(),
+            q_b_proj=object(),
+            w_kc=object(),
+            rotary_emb=object(),
+            layer_id=13,
+            num_local_heads=8,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=512,
+            quant_config=object(),
+        )
+
+        forward_mla_prepare_npu(model, object(), object(), object(), object(), object())
+
+        preprocess_cls.assert_called_once_with(
+            model.fused_qkv_a_proj_with_mqa,
+            model.q_a_layernorm,
+            model.kv_a_layernorm,
+            model.q_b_proj,
+            model.w_kc,
+            model.rotary_emb,
+            model.layer_id,
+            model.num_local_heads,
+            model.qk_nope_head_dim,
+            model.qk_rope_head_dim,
+            model.v_head_dim,
+            model.quant_config,
+        )
 
 
 class TestRoundUp(unittest.TestCase):
