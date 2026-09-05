@@ -76,6 +76,18 @@ class TestNPUFusedMLAPreprocessInit(CustomTestCase):
         self.assertTrue(torch.equal(cos, torch.ones_like(cos)))
         self.assertTrue(torch.equal(sin, torch.zeros_like(sin)))
 
+    def test_reshape_kv_caches_uses_cache_page_size(self):
+        module = self._create_module(SimpleNamespace(input_size=1536))
+        kv_cache = torch.empty(3, 128, 1, 512)
+        kv_rope_cache = torch.empty(3, 128, 1, 64)
+
+        kv_cache, kv_rope_cache = module._reshape_kv_caches_for_rmsnorm_rope(
+            kv_cache, kv_rope_cache
+        )
+
+        self.assertEqual(kv_cache.shape, (3, 128, 1, 512))
+        self.assertEqual(kv_rope_cache.shape, (3, 128, 1, 64))
+
 
 class TestRoundUp(unittest.TestCase):
     def test_exact_multiple(self):
