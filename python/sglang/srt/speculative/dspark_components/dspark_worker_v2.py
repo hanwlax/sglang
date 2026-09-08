@@ -82,6 +82,7 @@ from sglang.srt.utils import (
     is_npu,
     is_pin_memory_available,
 )
+from sglang.srt.utils.hccl_debug import hccl_trace
 
 logger = logging.getLogger(__name__)
 
@@ -599,6 +600,16 @@ class DSparkWorkerV2(BaseSpecWorker):
             new_seq_lens=next_draft_input.new_seq_lens,
         )
 
+    @hccl_trace(
+        "dspark.decode",
+        root=True,
+        inputs=("batch.seq_lens", "batch.req_pool_indices", "batch.input_ids"),
+        outputs=(
+            "result.next_token_ids",
+            "result.accept_lens",
+            "result.block_accept_lens",
+        ),
+    )
     def _forward_decode(
         self, batch: ScheduleBatch, on_publish, grammar_barrier=None
     ) -> GenerationBatchResult:

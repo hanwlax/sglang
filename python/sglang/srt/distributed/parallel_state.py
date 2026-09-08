@@ -70,6 +70,7 @@ from sglang.srt.utils import (
     is_xpu,
 )
 from sglang.srt.utils.custom_op import register_custom_op
+from sglang.srt.utils.hccl_debug import hccl_trace
 from sglang.srt.utils.network import get_local_ip_auto
 from sglang.srt.utils.stale_shm_cleanup import make_shm_name
 
@@ -647,6 +648,9 @@ class GroupCoordinator:
             with maybe_pynccl_context, maybe_pymscclpp_context:
                 yield graph_capture_context
 
+    @hccl_trace(
+        "tp.all_reduce", collective=True, inputs=("input_",), outputs=("result",)
+    )
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
         User-facing all-reduce function before we actually call the
@@ -1086,6 +1090,12 @@ class GroupCoordinator:
             )
         return output
 
+    @hccl_trace(
+        "tp.reduce_scatter_tensor",
+        collective=True,
+        inputs=("input",),
+        outputs=("output",),
+    )
     def reduce_scatter_tensor(self, output: torch.Tensor, input: torch.Tensor):
         if _is_npu or _is_cpu:
             # TODO: add optimized reduce_scatter_tensor kernel for cpu
@@ -1153,6 +1163,9 @@ class GroupCoordinator:
         else:
             torch.distributed.all_to_all_single(output, input, group=self.device_group)
 
+    @hccl_trace(
+        "tp.all_to_all_single", collective=True, inputs=("input",), outputs=("output",)
+    )
     def all_to_all_single(self, output: torch.Tensor, input: torch.Tensor):
         if self.world_size == 1:
             output.copy_(input)
@@ -1267,6 +1280,12 @@ class GroupCoordinator:
             return envs.SGLANG_USE_1STAGE_ALLREDUCE.get()
         return envs.SGLANG_ENABLE_DETERMINISTIC_INFERENCE.get()
 
+    @hccl_trace(
+        "tp.all_gather_into_tensor",
+        collective=True,
+        inputs=("input",),
+        outputs=("output",),
+    )
     def all_gather_into_tensor(self, output: torch.Tensor, input: torch.Tensor):
         if _is_npu or _is_cpu:
             # TODO: add optimized all_gather_into_tensor kernel for cpu
@@ -1278,6 +1297,9 @@ class GroupCoordinator:
             # + wait_tensor, which invokes sycl_event.wait() and breaks XPU graph capture.
             reg_all_gather_into_tensor(output, input, group_name=self.unique_name)
 
+    @hccl_trace(
+        "tp.all_gather", collective=True, inputs=("input_", "dim"), outputs=("result",)
+    )
     def all_gather(
         self,
         input_: torch.Tensor,

@@ -133,6 +133,7 @@ from sglang.srt.utils.common import (
     require_mlp_sync,
     set_weight_attrs,
 )
+from sglang.srt.utils.hccl_debug import hccl_trace
 
 logger = logging.getLogger(__name__)
 _is_hip = is_hip()
@@ -2551,6 +2552,18 @@ class KimiK3DecoderLayer(nn.Module):
 
         return result
 
+    @hccl_trace(
+        "k3.layer",
+        layer=True,
+        inputs=(
+            "hidden_states",
+            "residual",
+            "positions",
+            "attn_res.num_valid_blocks",
+            "input_sharded",
+        ),
+        outputs=("result.0", "result.1", "result.2", "attn_res.num_valid_blocks"),
+    )
     def forward(
         self,
         positions: torch.Tensor,
@@ -3046,6 +3059,23 @@ class KimiK3LinearForCausalLM(nn.Module):
         self.model.dspark_layers_to_capture = list(layer_ids)
 
     @torch.no_grad()
+    @hccl_trace(
+        "k3.target",
+        root=True,
+        inputs=(
+            "input_ids",
+            "positions",
+            "inputs_embeds",
+            "input_embeds",
+            "forward_batch.seq_lens",
+            "forward_batch.req_pool_indices",
+            "forward_batch.out_cache_loc",
+            "forward_batch.extend_seq_lens",
+            "forward_batch.num_token_non_padded",
+            "forward_batch.spec_info.custom_mask",
+        ),
+        outputs=("result.next_token_logits", "result.hidden_states"),
+    )
     def forward(
         self,
         input_ids: torch.Tensor,

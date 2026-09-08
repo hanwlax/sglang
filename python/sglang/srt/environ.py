@@ -457,6 +457,15 @@ class Envs:
     # ===================================================================
     # Debugging and invariant checks
     # ===================================================================
+    # Offline HCCL comparison; set before process startup. CPU snapshots sync
+    # the producing stream, so this is an eager-only numerical diagnostic.
+    SGLANG_DEBUG_HCCL_DIR = EnvStr("")
+    SGLANG_DEBUG_HCCL_MAX_STEPS = EnvInt(4)
+    SGLANG_DEBUG_HCCL_SKIP_STEPS = EnvInt(0)
+    SGLANG_DEBUG_HCCL_MAX_EVENTS = EnvInt(2000)
+    SGLANG_DEBUG_HCCL_LAYERS = EnvTuple(())
+    SGLANG_DEBUG_HCCL_SAVE_TENSORS = EnvBool(False)
+    SGLANG_DEBUG_HCCL_MAX_DUMP_MB = EnvInt(512)
     SGLANG_DETECT_SLOW_RANK = EnvBool(False)
     SGLANG_DEBUG_MEMORY_POOL = EnvBool(False)
     SGLANG_VALIDATE_MAMBA_REPLAY_STATE_INDICES = EnvBool(False)

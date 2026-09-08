@@ -47,6 +47,7 @@ from sglang.srt.speculative.spec_utils import (
     sample_simulated_acc_len,
 )
 from sglang.srt.utils import is_npu
+from sglang.srt.utils.hccl_debug import hccl_trace
 from sglang.srt.utils.invariants import Bucket, Invariant, NotNaN, expect
 
 _is_npu = is_npu()
@@ -102,6 +103,27 @@ class TargetVerifyExecutor:
         self._simulate_acc_len = float(simulate_acc_len)
         self._simulated_correct_drafts_buf: Optional[torch.Tensor] = None
 
+    @hccl_trace(
+        "dspark.accept",
+        inputs=(
+            "verify_ids_2d",
+            "target_logits",
+            "draft_block.draft_tokens",
+            "draft_block.corrected_logits",
+            "prefix_lens",
+            "draft_tokens",
+            "folded_accept",
+            "sampling_info.is_all_greedy",
+        ),
+        outputs=(
+            "result.correct_len",
+            "result.bonus",
+            "result.cap_trim_lens",
+            "result.commit_lens",
+            "result.new_seq_lens",
+            "result.out_tokens",
+        ),
+    )
     def accept_and_finalize(
         self,
         *,

@@ -30,6 +30,7 @@ from sglang.srt.speculative.spec_info import (
 from sglang.srt.speculative.spec_tp_sync import SpecTpSync, SpecTpSyncSite
 from sglang.srt.speculative.spec_utils import draft_tp_context
 from sglang.srt.utils.common import is_pin_memory_available
+from sglang.srt.utils.hccl_debug import hccl_trace
 from sglang.srt.utils.invariants import Bucket, Invariant, NotNaN, expect
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,16 @@ def resolve_greedy_mask(
     return (sampling_info.top_ks <= 1).view(-1)
 
 
+@hccl_trace(
+    "dspark.draft_sample",
+    inputs=("base_logits", "anchor_tokens", "draft_hidden"),
+    outputs=(
+        "result.draft_tokens",
+        "result.corrected_logits",
+        "result.greedy_mask",
+        "result.temperatures",
+    ),
+)
 def sample_draft_block(
     *,
     base_logits: torch.Tensor,
@@ -234,6 +245,21 @@ class DraftBlockProposer:
             return draft_tp_context(get_parallel().attn_tp_group)
         return nullcontext()
 
+    @hccl_trace(
+        "dspark.propose",
+        inputs=(
+            "batch.seq_lens",
+            "draft_input.hidden_states",
+            "draft_input.bonus_tokens",
+        ),
+        outputs=(
+            "result.draft_block_ids",
+            "result.draft_hidden",
+            "result.draft_block.draft_tokens",
+            "result.draft_block.corrected_logits",
+            "result.folded",
+        ),
+    )
     def propose(
         self,
         *,

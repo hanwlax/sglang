@@ -66,6 +66,7 @@ import torch
 import torch.distributed as dist
 
 from sglang.srt.runtime_context import get_resources
+from sglang.srt.utils.hccl_debug import hccl_trace
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
 
@@ -968,6 +969,10 @@ class DeepEPDispatcher(BaseDispatcher):
         ret = self.dispatch_b()
         return ret
 
+    @hccl_trace(
+        "deepep.dispatch_a",
+        inputs=("hidden_states", "topk_output.topk_ids", "topk_output.topk_weights"),
+    )
     def dispatch_a(
         self,
         hidden_states: torch.Tensor,
@@ -980,6 +985,18 @@ class DeepEPDispatcher(BaseDispatcher):
         )
         self._dispatch_intermediate_state = inner_state
 
+    @hccl_trace(
+        "deepep.dispatch_b",
+        outputs=(
+            "result.hidden_states",
+            "result.hidden_states_scale",
+            "result.topk_ids",
+            "result.topk_weights",
+            "result.num_recv_tokens_per_expert",
+            "result.masked_m",
+            "result.expected_m",
+        ),
+    )
     def dispatch_b(self):
         self._update_stage(_Stage.AFTER_DISPATCH_A, _Stage.AFTER_DISPATCH_B)
         inner_state = self._dispatch_intermediate_state
@@ -994,6 +1011,14 @@ class DeepEPDispatcher(BaseDispatcher):
         ret = self.combine_b()
         return ret
 
+    @hccl_trace(
+        "deepep.combine_a",
+        inputs=(
+            "combine_input.hidden_states",
+            "combine_input.topk_ids",
+            "combine_input.topk_weights",
+        ),
+    )
     def combine_a(
         self,
         combine_input: CombineInput,
@@ -1007,6 +1032,7 @@ class DeepEPDispatcher(BaseDispatcher):
         )
         self._combine_intermediate_state = inner_state
 
+    @hccl_trace("deepep.combine_b", outputs=("result",))
     def combine_b(self):
         self._update_stage(_Stage.AFTER_COMBINE_A, _Stage.INITIAL)
         inner_state = self._combine_intermediate_state
