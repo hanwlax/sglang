@@ -230,6 +230,68 @@ class TestHcclDebug(CustomTestCase):
             compare.compare_runs(a.directory.parent, b.directory.parent)[1], 2
         )
 
+    def test_allreduce_reference_and_alignment_details(self):
+        spec = importlib.util.spec_from_file_location(
+            "compare_hccl_debug",
+            Path(__file__).resolve().parents[4] / "scripts/compare_hccl_debug.py",
+        )
+        compare = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(compare)
+        left, right = Path(self.tmp.name) / "left", Path(self.tmp.name) / "right"
+        # FP64 sum = 1; BF16 serial rounding can lose the middle contribution.
+        for directory, output in ((left, 1.0), (right, 0.0)):
+            for rank, value in enumerate((256.0, 1.0, -256.0)):
+                recorder = debug.HcclDebugRecorder(
+                    directory, rank=rank, metadata={"world_size": 3}
+                )
+                recorder.save_tensors = True
+                recorder.stack.append({"root": ["test", 0], "name": "tp.all_reduce"})
+                metadata = {
+                    "ranks": [0, 1, 2],
+                    "world_size": 3,
+                    "rank_in_group": rank,
+                    "group": "tp0",
+                }
+                recorder.emit(
+                    "before",
+                    {"input_": torch.tensor([[value]], dtype=torch.bfloat16)},
+                    ("input_",),
+                    metadata,
+                )
+                recorder.emit(
+                    "after",
+                    {"result": torch.tensor([[output]], dtype=torch.bfloat16)},
+                    ("result",),
+                    metadata,
+                )
+        reference = compare.allreduce_reference(left, right, 1)
+        self.assertTrue(reference["all_rank_inputs_match_between_modes"])
+        self.assertTrue(
+            reference["modes"]["right"]["outputs_bitwise_equal_across_group"]
+        )
+        for result in reference["modes"]["left"]["outputs"]:
+            self.assertEqual(result["num_different_from_rounded_reference"], 0)
+        for result in reference["modes"]["right"]["outputs"]:
+            self.assertEqual(result["max_abs_vs_fp64"], 1)
+        with self.assertRaisesRegex(ValueError, "not an AllReduce output"):
+            compare.allreduce_reference(left, right, 0)
+        path = right / "rank-1/events.jsonl"
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        records[1]["metadata"]["mode"] = "different"
+        path.write_text("\n".join(json.dumps(e) for e in records) + "\n")
+        report, status = compare.compare_runs(left, right)
+        self.assertEqual(status, 2)
+        self.assertEqual(
+            report["ranks"][1]["alignment_mismatch"]["right_metadata"]["mode"],
+            "different",
+        )
+        # Replacing a .pt without its JSON digest must fail closed.
+        torch.save(
+            torch.tensor([[2.0]], dtype=torch.bfloat16), right / "rank-1/000000-000.pt"
+        )
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            compare.allreduce_reference(left, right, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

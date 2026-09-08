@@ -8,6 +8,7 @@ correctness. Never compare TP8 and TP32 dumps as a communication-mode A/B.
 """
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -59,6 +60,162 @@ def numeric_diff(left, right):
 
 def event_key(event):
     return event["root"], event["scope"], event["edge"]
+
+
+def _saved_tensor(directory, event, name):
+    import torch
+
+    summary = event["tensors"][name]
+    if "file" not in summary:
+        raise ValueError(
+            f"{directory}: event {event['event']} {name} has no saved tensor"
+        )
+    value = torch.load(
+        directory / summary["file"], map_location="cpu", weights_only=True
+    )
+    raw = value.contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+    if (
+        list(value.shape) != summary["shape"]
+        or str(value.dtype) != summary["dtype"]
+        or hashlib.sha256(raw).hexdigest() != summary["sha256"]
+    ):
+        raise ValueError(f"{directory}: saved tensor does not match its JSON summary")
+    if not value.is_floating_point() or not torch.isfinite(value).all():
+        raise ValueError("AllReduce reference requires finite floating-point tensors")
+    return value
+
+
+def _allreduce_pair(run, event_id):
+    directory, _, records = run
+    after = next((e for e in records if e.get("event") == event_id), None)
+    if (
+        after is None
+        or after["edge"] != "after"
+        or after["scope"][-1] != "tp.all_reduce"
+    ):
+        raise ValueError(f"{directory}: event {event_id} is not an AllReduce output")
+    before = next(
+        (
+            e
+            for e in reversed(records)
+            if (
+                e.get("type") == "snapshot"
+                and e["event"] < event_id
+                and e["root"] == after["root"]
+                and e["scope"] == after["scope"]
+                and e["edge"] == "before"
+            )
+        ),
+        None,
+    )
+    if before is None:
+        raise ValueError(f"{directory}: missing AllReduce input event")
+    return before, after
+
+
+def allreduce_reference(left, right, event_id, rank=0):
+    """Compare both modes to a CPU FP64 SUM of the SAME saved per-rank inputs.
+
+    This diagnoses the selected SUM boundary, not end-to-end accept behavior.
+    It neither runs NPU communication nor claims FP64 addition is exact.
+    """
+    import torch
+
+    runs = {"left": load_run(left), "right": load_run(right)}
+    if rank not in runs["left"]:
+        raise ValueError(f"Missing reference rank {rank}")
+    _, anchor = _allreduce_pair(runs["left"][rank], event_id)
+    members = anchor["metadata"]["ranks"]
+    if rank not in members or len(set(members)) != len(members):
+        raise ValueError("Invalid AllReduce group members")
+    pairs = {}
+    reference = None
+    for member in members:
+        for side, run in runs.items():
+            if member not in run:
+                raise ValueError(f"{side}: missing group member {member}")
+            before, after = _allreduce_pair(run[member], event_id)
+            for event in (before, after):
+                meta = event["metadata"]
+                if (
+                    event["root"] != anchor["root"]
+                    or event["scope"] != anchor["scope"]
+                    or meta["ranks"] != members
+                    or meta["world_size"] != len(members)
+                    or meta["rank_in_group"] != members.index(member)
+                    or meta["group"] != anchor["metadata"]["group"]
+                ):
+                    raise ValueError(
+                        f"{side} rank {member}: different collective identity"
+                    )
+            pairs[side, member] = before, after
+        a = _saved_tensor(runs["left"][member][0], pairs["left", member][0], "input_")
+        b = _saved_tensor(runs["right"][member][0], pairs["right", member][0], "input_")
+        if (
+            a.shape != b.shape
+            or a.dtype != b.dtype
+            or pairs["left", member][0]["tensors"]["input_"]["sha256"]
+            != pairs["right", member][0]["tensors"]["input_"]["sha256"]
+        ):
+            raise ValueError(
+                f"rank {member}: inputs differ between modes; no common reference"
+            )
+        if reference is None:
+            reference = torch.zeros_like(a, dtype=torch.float64)
+            dtype = a.dtype
+        if a.shape != reference.shape or a.dtype != dtype:
+            raise ValueError("Group members have different input shapes/dtypes")
+        reference.add_(a.double())
+    rounded = reference.to(dtype)
+    reference_norm = float(torch.linalg.vector_norm(reference))
+    report = {
+        "event": event_id,
+        "root": anchor["root"],
+        "scope": anchor["scope"],
+        "group_ranks": members,
+        "shape": list(reference.shape),
+        "dtype": str(dtype),
+        "all_rank_inputs_match_between_modes": True,
+        "reference": "CPU FP64 SUM in group-rank order; also rounded once to input dtype",
+        "modes": {},
+    }
+    for side, run in runs.items():
+        outputs = []
+        for member in members:
+            _, after = pairs[side, member]
+            output = _saved_tensor(run[member][0], after, "result")
+            if output.shape != reference.shape or output.dtype != dtype:
+                raise ValueError("AllReduce output shape/dtype differs from input")
+            delta = output.double() - reference
+            error_norm = float(torch.linalg.vector_norm(delta))
+            outputs.append(
+                {
+                    "rank": member,
+                    "sha256": after["tensors"]["result"]["sha256"],
+                    "max_abs_vs_fp64": float(delta.abs().max())
+                    if delta.numel()
+                    else 0.0,
+                    "relative_l2_vs_fp64": error_norm / reference_norm
+                    if reference_norm
+                    else (0.0 if not error_norm else "inf"),
+                    "num_different_from_rounded_reference": int(
+                        (output != rounded).sum()
+                    ),
+                    "numel": output.numel(),
+                    "max_abs_vs_rounded_reference": float(
+                        (output.double() - rounded.double()).abs().max()
+                    )
+                    if output.numel()
+                    else 0.0,
+                }
+            )
+        report["modes"][side] = {
+            "requested_mode": run[rank][1].get("hccl_op_expansion_mode_requested"),
+            "outputs_bitwise_equal_across_group": len({e["sha256"] for e in outputs})
+            == 1,
+            "outputs": outputs,
+        }
+    return report
 
 
 def compare_runs(left, right, *, tensors=False):
@@ -113,6 +270,14 @@ def compare_runs(left, right, *, tensors=False):
             )
         for x, y in zip(ae, be):
             if event_key(x) != event_key(y) or x["metadata"] != y["metadata"]:
+                entry["alignment_mismatch"] = {
+                    "left_event": x["event"],
+                    "right_event": y["event"],
+                    "left_key": event_key(x),
+                    "right_key": event_key(y),
+                    "left_metadata": x["metadata"],
+                    "right_metadata": y["metadata"],
+                }
                 report["incomplete"].append(
                     f"rank {rank}: event {x['event']} scope/metadata diverged; stop alignment"
                 )
@@ -158,10 +323,29 @@ def main():
     parser.add_argument("left")
     parser.add_argument("right")
     parser.add_argument("--tensors", action="store_true")
+    parser.add_argument(
+        "--allreduce-event",
+        type=int,
+        help="Also compare this AllReduce after-event to a saved-input FP64 SUM",
+    )
+    parser.add_argument(
+        "--reference-rank",
+        type=int,
+        default=0,
+        help="Rank whose group selects the AllReduce reference (default: 0)",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
         report, status = compare_runs(args.left, args.right, tensors=args.tensors)
+        if args.allreduce_event is not None:
+            try:
+                report["allreduce_reference"] = allreduce_reference(
+                    args.left, args.right, args.allreduce_event, args.reference_rank
+                )
+            except (ValueError, OSError, KeyError) as exc:
+                report["allreduce_reference_error"] = str(exc)
+                status = 2
     except (ValueError, OSError) as exc:
         parser.exit(2, f"Cannot compare: {exc}\n")
     encoded = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)

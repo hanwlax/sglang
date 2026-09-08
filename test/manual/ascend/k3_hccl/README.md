@@ -158,3 +158,30 @@ cap trim、rank 同步与状态。仅 checksum 不同还需量化误差、检查
 
 人工启动完成后保留：两组完整服务日志、请求/响应、所有 rank 的诊断目录、
 compare.json、版本信息和实际启动命令，再进行下一步定位。
+
+## 首差出现在 AllReduce 输出时
+
+若所有 rank 的首差都是同一 AllReduce 的 after 事件，可直接使用已保存的
+输入/输出构造 CPU FP64 SUM 参考。例如 after 事件号为 3：
+
+```bash
+python3 scripts/compare_hccl_debug.py \
+  /tmp/k3-hccl/aiv-run1 /tmp/k3-hccl/ccu-run1 \
+  --tensors --allreduce-event 3 \
+  --output /tmp/k3-hccl/compare-reference.json
+```
+
+工具从参考 rank（默认 0，可用 `--reference-rank` 指定）的通信域读取全部
+成员，验证 `.pt` 与日志摘要匹配、逐 rank 两组输入位级相同，再按域内 rank
+顺序进行 FP64 求和。每种模式输出报告包含相对 FP64 的误差、与“FP64 求和
+后仅一次转回 BF16/原 dtype”结果不同的元素数，以及域内输出是否一致。
+FP64 是高精度参考，不承诺所有输入下都等于精确实数求和。此功能只适用于
+本诊断 `tp.all_reduce` 的 SUM；需要该次所有成员输入/输出的 `.pt`。
+缺失文件、输入不一致或摘要校验失败会写 `allreduce_reference_error`。
+
+该参考分析独立于后续事件是否对齐：例如 event 15 停止对齐，不影响验证
+完整的 event 2/3。新报告会在 `alignment_mismatch` 中给出停止位置两侧的
+scope 和 metadata，可区分调用路径变化、路由计数变化等；仍不跳过这些差异
+强行比较后续事件。`bitwise_different_tensors` 只统计停止对齐之前的窗口。
+hidden tensor 的 `last_dim_argmax_different` 是通道索引变化，不是输出 token
+变化；接受长度因果关系仍需关联到真实 draft/target logits 和接受结果。
