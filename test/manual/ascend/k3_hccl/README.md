@@ -308,7 +308,8 @@ for mode in AIV CCU_SCHED; do
   mkdir -p "$out" || break
   HCCL_OP_EXPANSION_MODE="$mode" \
   python3 -m torch.distributed.run \
-    --standalone --nnodes=1 --nproc-per-node=8 \
+    --nnodes=1 --node-rank=0 --nproc-per-node=8 \
+    --rdzv-backend=static --master-addr=127.0.0.1 --master-port=29517 \
     scripts/replay_hccl_allreduce.py run \
     --left /tmp/k3-hccl/aiv-run1 \
     --right /tmp/k3-hccl/ccu-run1 --event 3 \
@@ -321,6 +322,15 @@ for mode in AIV CCU_SCHED; do
   fi
 done
 ```
+
+单容器重放显式使用 static rendezvous 和 IPv4 回环地址，避免 `--standalone`
+的 c10d rendezvous 在发布 worker 的 TCPStore 地址时依赖容器主机名解析。
+若看到 `The IPv6 network addresses of (<容器主机名>, <端口>) cannot be
+retrieved`，这是 c10d 地址解析警告，本身不证明 HCCL 归约失败。使用上述
+命令时必须移除 `--standalone`，仅额外设置 MASTER_ADDR 不够；若当前 shell
+还传了其他 `--rdzv-endpoint`，也应移除。29517 若被占用则改为其他空闲端口。
+HCCL_SOCKET_IFNAME、GLOO_SOCKET_IFNAME 保持原采集设置，它们与这里显式
+指定的 TCPStore 地址不是同一个配置项，无需为此修改容器 hosts 或禁用 IPv6。
 
 两次重放均从同一份 left 输入加载，right 输入只参与相等性校验和原模型结果
 对照。输出目录必须是新目录，已有任意 `rank-N` 子目录会报错，避免混入旧结果；
