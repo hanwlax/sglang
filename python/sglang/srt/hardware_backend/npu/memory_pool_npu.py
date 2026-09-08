@@ -754,9 +754,21 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
     ) -> None:
         """Store MLA latent and RoPE KV tensors in FIA's NZ tile order."""
 
+        if loc.numel() == 0:
+            return
+
         def scatter(cache: torch.Tensor, values: torch.Tensor, head_dim: int):
             num_tiles = head_dim // 16
-            indices = _mla_fia_nz_scatter_indices(loc, head_dim, self.page_size)
+            if cache.device.type == "npu":
+                from sglang.kernels.ops.kvcache.triton_mla_nz_indices import (
+                    build_mla_nz_indices,
+                )
+
+                indices = build_mla_nz_indices(
+                    loc, self.page_size, head_dim, cache.shape[0]
+                ).view(-1, 1)
+            else:
+                indices = _mla_fia_nz_scatter_indices(loc, head_dim, self.page_size)
             # Destination rows are ordered [page, tile, slot]. Source rows use
             # the matching [token, tile] order after this reshape.
             dst = cache.view(-1, 1, num_tiles, self.page_size, 16).view(-1, 16)
