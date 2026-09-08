@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -33,6 +34,16 @@ class TestHcclDebug(CustomTestCase):
 
     def events(self, recorder):
         return [json.loads(line) for line in recorder.path.read_text().splitlines()]
+
+    def replay_module(self):
+        scripts = Path(__file__).resolve().parents[4] / "scripts"
+        with patch.object(sys, "path", [str(scripts), *sys.path]):
+            spec = importlib.util.spec_from_file_location(
+                "replay_hccl_allreduce", scripts / "replay_hccl_allreduce.py"
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        return module
 
     @contextmanager
     def runtime_graph(self, decode="disabled", prefill="disabled", compile=False):
@@ -245,7 +256,9 @@ class TestHcclDebug(CustomTestCase):
         for directory, output in ((left, 1.0), (right, 0.0)):
             for rank, value in enumerate((256.0, 1.0, -256.0)):
                 recorder = debug.HcclDebugRecorder(
-                    directory, rank=rank, metadata={"world_size": 3}
+                    directory,
+                    rank=rank,
+                    metadata={"world_size": 3, "hostname": "fixture-host"},
                 )
                 recorder.save_tensors = True
                 recorder.stack.append({"root": ["test", 0], "name": "tp.all_reduce"})
@@ -284,6 +297,11 @@ class TestHcclDebug(CustomTestCase):
             len(brief["allreduce_reference"]["modes"]["left"]["outputs"]), 1
         )
         self.assertEqual(len(reference["modes"]["left"]["outputs"]), 3)
+        replay = self.replay_module()
+        source, golden, _, hashes = replay.prepare_case(left, right, 1, rank=1)
+        self.assertEqual(source.item(), 1)
+        self.assertEqual(golden.item(), 1)
+        self.assertEqual(len(hashes), 3)
         with self.assertRaisesRegex(ValueError, "not an AllReduce output"):
             compare.allreduce_reference(left, right, 0)
         path = right / "rank-1/events.jsonl"
@@ -302,6 +320,87 @@ class TestHcclDebug(CustomTestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not match"):
             compare.allreduce_reference(left, right, 1)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            replay.prepare_case(left, right, 1)
+
+    def test_replay_restores_input_and_synchronizes_every_iteration(self):
+        replay = self.replay_module()
+        source = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+        steps, outputs = [], []
+
+        def reduce(value):
+            self.assertTrue(torch.equal(value, source))
+            steps.append("reduce")
+            value.mul_(3)
+
+        replay.replay_iterations(
+            source,
+            3,
+            2,
+            allocate=torch.empty_like,
+            synchronize=lambda: steps.append("sync"),
+            reduce=reduce,
+            observe=lambda i, phase, output: outputs.append((i, phase, output)),
+        )
+        self.assertEqual(steps, ["sync", "reduce", "sync"] * 5)
+        self.assertEqual(
+            [phase for _, phase, _ in outputs], ["warmup"] * 2 + ["measured"] * 3
+        )
+        self.assertTrue(torch.equal(source, torch.tensor([1, 2], dtype=torch.bfloat16)))
+        self.assertTrue(all(torch.equal(value, source * 3) for _, _, value in outputs))
+        self.assertEqual(
+            replay.error_metrics(source, source.double())["relative_l2_vs_fp64"], 0
+        )
+        self.assertEqual(
+            replay.error_metrics(torch.tensor([float("nan")]), torch.ones(1))[
+                "nonfinite"
+            ],
+            1,
+        )
+
+    def test_replay_summary_rejects_incomplete_or_tampered_results(self):
+        replay = self.replay_module()
+        root = Path(self.tmp.name)
+        for rank in range(2):
+            directory = root / f"rank-{rank}"
+            directory.mkdir()
+            value = torch.tensor([3.0], dtype=torch.bfloat16)
+            torch.save(value, directory / "output.pt")
+            entry = {
+                "iteration": 0,
+                "sha256": replay.digest(value),
+                "file": "output.pt",
+                "matches_model": {"left": True, "right": False},
+                "nonfinite": 0,
+            }
+            report = {
+                "rank": rank,
+                "world_size": 2,
+                "requested_mode": "AIV",
+                "source_event": 3,
+                "source_root": ["test", 0],
+                "source_scope": ["tp.all_reduce"],
+                "group_ranks": [0, 1],
+                "all_input_sha256": ["a", "b"],
+                "shape": [1],
+                "dtype": "torch.bfloat16",
+                "warmup": 0,
+                "iterations": 1,
+                "records": [entry],
+                "completed": True,
+            }
+            (directory / "report.json").write_text(json.dumps(report))
+        summary = replay.summarize(root)
+        self.assertTrue(summary["all_ranks_repeatable_including_warmup"])
+        self.assertTrue(summary["all_outputs_match_model"]["left"])
+        self.assertTrue(summary["all_ranks_equal_each_iteration"])
+        (root / "rank-1/report.json").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing or duplicate"):
+            replay.summarize(root)
+        (root / "rank-1/report.json").write_text(json.dumps(report))
+        torch.save(torch.tensor([4.0], dtype=torch.bfloat16), root / "rank-1/output.pt")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            replay.summarize(root)
 
     def test_scope_inspection_survives_alignment_stop(self):
         spec = importlib.util.spec_from_file_location(

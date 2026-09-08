@@ -265,3 +265,94 @@ correct_len、最终 commit_lens；前缀已分歧后不继续按轮号逐元素
 如果 `matching_events=0`，检查事件预算、是否实际进入 DSPARK decode，
 以及是否更新了采集端源码；若 `.pt` 被 prefill 耗尽预算，按磁盘空间调整
 MAX_DUMP_MB 或缩小层采集范围后重新采集，不从摘要推断完整 logits。
+
+## 独立重放已保存的 AllReduce（单机 TP8）
+
+使用 `scripts/replay_hccl_allreduce.py`，与 `compare_hccl_debug.py` 放在同一
+目录。脚本不导入 SGLang，不加载模型，不需要 START、请求或前缀填充。
+`check` 和 `summarize` 只需要 CPU PyTorch；`run` 需要 torch_npu 和 NPU。
+此版本只支持单机完整通信域 `[0, ..., N-1]`、原始连续输入、SUM，
+正好覆盖当前 event 3。其他子通信域、跨机或非连续输入会拒绝，而非静默
+重映射。它会验证双方所有 rank 的输入相同、输入输出 `.pt` 与摘要一致。
+
+先人工停止原模型服务，使用同一台服务器、同一容器/软件版本、同一组物理
+NPU 和原 rank 到设备映射。保持采集时的 HCCL_BUFFSIZE、HCCL_ALGO、确定性
+配置和网卡设置；不要同时调整这些参数。确保 torchrun 的全部子进程都能
+看到原 8 张卡，而非继承某个 SGLang worker 的单卡可见配置。
+保存 CANN/HCCL、驱动、固件版本以及实际环境；脚本另外记录 torch、torch_npu、
+设备名称、请求的展开模式和部分通信环境变量。实际引擎仍需 HCCL 日志确认。
+
+在源码根目录运行预检（不会启动通信）：
+
+```bash
+python3 scripts/replay_hccl_allreduce.py check \
+  --left /tmp/k3-hccl/aiv-run1 \
+  --right /tmp/k3-hccl/ccu-run1 --event 3
+```
+
+期望 `ready=true`、group_ranks 为 0–7、shape 为 `[1024, 7168]`、dtype 为
+`torch.bfloat16`。失败则先解决缺失文件、输入不一致或布局不支持，不继续运行。
+首次每轮读取 CPU 输入并做显式设备同步；每个 rank 只有自己的独占工作 buffer，
+直接调用 `torch.distributed.all_reduce(..., SUM)`，归约后同步再拷回 CPU。
+每轮都从原输入恢复，包括 warmup，绝不把上一次归约输出作为下一次输入。
+2 次 warmup 也保留证据，随后执行 10 次测量；这里“测量”指正确性观察，
+不测延迟或吞吐。每一种不同输出保存一份 `.pt`，每轮记录 hash 和 FP64 误差。
+
+分别用全新的进程运行两种模式，顺序执行（以下 Bash 块）：
+
+```bash
+set -o pipefail
+export OMP_NUM_THREADS=1
+for mode in AIV CCU_SCHED; do
+  out="/tmp/k3-hccl/replay-${mode}-run1"
+  mkdir -p "$out" || break
+  HCCL_OP_EXPANSION_MODE="$mode" \
+  python3 -m torch.distributed.run \
+    --standalone --nnodes=1 --nproc-per-node=8 \
+    scripts/replay_hccl_allreduce.py run \
+    --left /tmp/k3-hccl/aiv-run1 \
+    --right /tmp/k3-hccl/ccu-run1 --event 3 \
+    --mode "$mode" --warmup 2 --iterations 10 \
+    --output "$out" 2>&1 | tee "$out/run.log"
+  replay_status=$?
+  if [ "$replay_status" -ne 0 ]; then
+    echo "Replay failed: $mode (exit $replay_status); inspect $out/run.log"
+    break
+  fi
+done
+```
+
+两次重放均从同一份 left 输入加载，right 输入只参与相等性校验和原模型结果
+对照。输出目录必须是新目录，已有任意 `rank-N` 子目录会报错，避免混入旧结果；
+失败后再次运行也需改用新目录。目录只保存本次重放证据，不修改原始采集文件。
+如果启动通信失败，查最早的 rank/主进程异常，不把其他 rank 的 TCPStore
+断连报错直接判定为 AllReduce 数值错误。
+
+两组成功后汇总：
+
+```bash
+python3 scripts/replay_hccl_allreduce.py summarize \
+  /tmp/k3-hccl/replay-AIV-run1 \
+  /tmp/k3-hccl/replay-CCU_SCHED-run1 \
+  --output /tmp/k3-hccl/replay-summary.json
+```
+
+汇总验证所有 rank 完成、迭代数一致、已保存输出的 shape/dtype/hash 正确，
+并检查两组重放使用同一组输入。屏幕上仅在域内一致时省略重复 rank 的首轮
+结果，完整 JSON 保留各 rank 首轮结果，每轮详情在 `rank-N/report.json`。
+
+重点字段：
+
+- `all_ranks_repeatable_including_warmup`：每个 rank 在全部 12 轮是否位级稳定。
+- `all_ranks_equal_each_iteration`：每一轮所有 rank 的输出是否位级一致。
+- `all_outputs_match_model.left/right`：所有轮次、所有 rank 是否分别等于
+  原 aiv-run1 / ccu-run1 保存的模型内归约输出；left/right 指来源目录。
+- `any_nonfinite`：任意输出是否出现 NaN/Inf。
+- `max_abs_vs_fp64`、`relative_l2_vs_fp64`：相对全部原输入 CPU FP64 SUM 的误差。
+
+如果 AIV 重放稳定匹配 left、CCU 重放稳定匹配 right，且两组 hash 不同，
+则强力支持该次首差可脱离模型算子、专家路由和模型调度复现。仍需根据归约
+精度要求区分允许的浮点差异与实现错误，不能直接证明完整模型接受长度根因。
+若无法匹配原模型输出，不立即归因于模型调度：新通信域、内存地址、算法选择、
+通信配置或实际引擎也可能不同，先核对这些条件。进程内重复稳定后，可以用
+run2 新目录再启动一轮，检查跨进程重启的重复性。
