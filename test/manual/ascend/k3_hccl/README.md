@@ -14,6 +14,9 @@
 - TP8 复现可以继续缩小问题；TP8 正常不能排除跨机算法、消息阈值、
   TP 分片或混部问题。裁层后的接受长度也不是完整模型精度指标。
 - 保留 K3 原层号、位置和必要状态；不要仅修改层数后把异常接受率归因于通信。
+- 当前裁层 target 与原 draft 不匹配，两种通信模式下接受长度均为 1；
+  当前运行还使用环境变量模拟接受长度。因此此阶段只定位数值边界和路由
+  变化，不以接受长度判断通信精度。真实接受长度的因果验证留给完整模型。
 
 ## 启动前修改原脚本
 
@@ -185,3 +188,80 @@ scope 和 metadata，可区分调用路径变化、路由计数变化等；仍�
 强行比较后续事件。`bitwise_different_tensors` 只统计停止对齐之前的窗口。
 hidden tensor 的 `last_dim_argmax_different` 是通道索引变化，不是输出 token
 变化；接受长度因果关系仍需关联到真实 draft/target logits 和接受结果。
+
+## 下一轮：先查裁层路由，再用完整模型验证接受长度
+
+已采数据确认第 0 层 AllReduce 的所有 rank 输入在 AIV/CCU 两组相同，
+输出不同，且各模式域内输出一致。两组相对 FP64 的 L2 误差接近，
+不能只凭此认定 CCU 精度显著更差。后续第 1 层 dispatch 接收专家计数不同，
+下一步先查看发送侧 `deepep.dispatch_a` 的 `topk_output.topk_ids` 和
+`topk_output.topk_weights`，判断路由是否在 dispatch 前已经分歧。
+
+**现有数据无需重新采集**，更新分析脚本即可使用简短输出：
+
+```bash
+python3 scripts/compare_hccl_debug.py \
+  /tmp/k3-hccl/aiv-run1 /tmp/k3-hccl/ccu-run1 \
+  --tensors --allreduce-event 3 --brief \
+  --output /tmp/k3-hccl/compare-reference.json
+
+python3 scripts/compare_hccl_debug.py \
+  /tmp/k3-hccl/aiv-run1 /tmp/k3-hccl/ccu-run1 \
+  --inspect-scope deepep.dispatch_a --inspect-rank 0 --inspect-limit 8 \
+  --brief --output /tmp/k3-hccl/inspect-routing-rank0.json
+```
+
+`--brief` 合并相同的 rank 摘要；归约参考在验证所有成员后才省略相同输出。
+`--output` 始终保留完整比较报告。scope 检视默认仅展示指定 rank 的前 16 个
+匹配事件，`omitted_events` 表示未展示数；需要时增加 `--inspect-limit`。
+rank 0 用于先看位置，归因需要检查全部参与 rank，可将 `--inspect-rank`
+依次改为 0 至 7，并使用不同输出文件。
+
+检视功能独立读取两侧记录，event 15 后仍能查看，但**不进行自动对齐**。
+相同 root 序号不保证相同前缀、cache 状态或有效行。发送侧 top-k 已不同则
+接收计数不同可能是路由的后果；若所有发送侧路由相同、接收计数仍不同，
+再检查 DeepEP 映射、padding 和分发。缺少 `.pt` 时 hash 可提示差异，
+不能量化变更的 token 数或专家集合。`saved_file_exists` 只检查文件存在，
+完整归约参考仍会校验 `.pt` 内容与 JSON 摘要。
+
+裁层对照可以保留相同的模拟接受设置以控制执行形状；重新采集时两侧设置
+必须相同。模拟长度相同不保证后续 token、路由或状态相同。建议补做独立
+重启的 AIV/AIV 和 CCU/CCU 对照，先确认首个归约差异是否具有可重复性。
+
+完整模型阶段才在**所有节点的最终启动环境**关闭接受和专家路由模拟：
+
+```bash
+export SGLANG_SIMULATE_ACC_LEN=-1
+unset SGLANG_SIMULATE_ACC_METHOD SGLANG_SIMULATE_ACC_TOKEN_MODE
+export SGLANG_SIMULATE_UNIFORM_EXPERTS=0
+export SGLANG_SIMULATE_ROUND_ROBIN_EXPERTS=0
+```
+
+检查启动脚本没有再次覆盖；保留完整 target、匹配 draft、原问题拓扑。
+仍按「启动 → 清缓存 → 填充相同前缀 → START → 正式缓存测试」执行，
+第一轮单请求、固定输入、temperature=0，两个模式分别使用新目录和新服务。
+不要在填充前缀后再次 flush cache。先确认实际 cache 命中和有效输入一致。
+
+新日志 manifest 记录 `simulation`；`dspark.accept` 的 before metadata
+还记录执行器实际持有的 `self._simulate_acc_len`。新增 eager scope
+`dspark.accept_raw` 在模拟覆盖和 TP 同步前记录真实内核返回值：
+`result.0` = drafts-only correct_len，`result.1` = bonus，
+`result.2` = cap_trim_lens。外层 `dspark.accept` 的 after 记录最终结果。
+没有修改接受算法或模拟设置。raw 结果仍受当前模型及历史状态影响，
+不能把模拟轨迹中的 raw 长度作为完整模型真实运行的接受率。
+
+完整模型采集后使用：
+
+```bash
+python3 scripts/compare_hccl_debug.py \
+  /tmp/k3-hccl/aiv-full-run1 /tmp/k3-hccl/ccu-full-run1 \
+  --inspect-scope dspark.accept --inspect-rank 0 --inspect-limit 8 \
+  --brief --output /tmp/k3-hccl/inspect-accept-rank0.json
+```
+
+scope 匹配包含嵌套的 accept_raw。先关联首轮候选、target logits、raw
+correct_len、最终 commit_lens；前缀已分歧后不继续按轮号逐元素归因。
+旧日志无 simulation 时标记 unknown，无 accept_raw 时无法追溯覆盖前结果。
+如果 `matching_events=0`，检查事件预算、是否实际进入 DSPARK decode，
+以及是否更新了采集端源码；若 `.pt` 被 prefill 耗尽预算，按磁盘空间调整
+MAX_DUMP_MB 或缩小层采集范围后重新采集，不从摘要推断完整 logits。

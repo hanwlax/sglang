@@ -106,6 +106,7 @@ class TargetVerifyExecutor:
     @hccl_trace(
         "dspark.accept",
         inputs=(
+            "self._simulate_acc_len",
             "verify_ids_2d",
             "target_logits",
             "draft_block.draft_tokens",
@@ -733,6 +734,13 @@ class DsparkVerifyEpilogue:
             )
 
 
+@hccl_trace(
+    "dspark.accept_raw",
+    inputs=("gamma", "verify_num_draft_tokens", "cutoff_layout.verify_lens"),
+    # Snapshot before the caller overrides correct_len or synchronizes ranks.
+    # Tuple fields: drafts-only correct_len, bonus, cap_trim_lens.
+    outputs=("result.0", "result.1", "result.2"),
+)
 def accept_draft_tokens(
     *,
     candidates: torch.Tensor,

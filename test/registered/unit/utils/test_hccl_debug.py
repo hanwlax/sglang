@@ -65,13 +65,16 @@ class TestHcclDebug(CustomTestCase):
             yield
 
     def test_resolved_eager_config_allows_raw_none(self):
-        with self.runtime_graph():
+        with self.runtime_graph(), envs.SGLANG_SIMULATE_ACC_LEN.override(1.0):
             recorder = debug._get_recorder()
             self.assertIs(debug._get_recorder(), recorder)
             state = self.events(recorder)[0]["graph_state"]
             self.assertEqual(state["decode_backend"], "disabled")
             self.assertEqual(state["prefill_backend"], "disabled")
             self.assertFalse(state["enable_torch_compile"])
+            self.assertEqual(
+                self.events(recorder)[0]["simulation"]["SGLANG_SIMULATE_ACC_LEN"], 1.0
+            )
 
     def test_effective_graph_or_compile_still_rejected(self):
         for config in (
@@ -273,6 +276,14 @@ class TestHcclDebug(CustomTestCase):
             self.assertEqual(result["num_different_from_rounded_reference"], 0)
         for result in reference["modes"]["right"]["outputs"]:
             self.assertEqual(result["max_abs_vs_fp64"], 1)
+        report, _ = compare.compare_runs(left, right)
+        report["allreduce_reference"] = reference
+        brief = compare.brief_report(report)
+        self.assertEqual(brief["rank_groups"][0]["ranks"], [0, 1, 2])
+        self.assertEqual(
+            len(brief["allreduce_reference"]["modes"]["left"]["outputs"]), 1
+        )
+        self.assertEqual(len(reference["modes"]["left"]["outputs"]), 3)
         with self.assertRaisesRegex(ValueError, "not an AllReduce output"):
             compare.allreduce_reference(left, right, 0)
         path = right / "rank-1/events.jsonl"
@@ -291,6 +302,49 @@ class TestHcclDebug(CustomTestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not match"):
             compare.allreduce_reference(left, right, 1)
+
+    def test_scope_inspection_survives_alignment_stop(self):
+        spec = importlib.util.spec_from_file_location(
+            "compare_hccl_debug",
+            Path(__file__).resolve().parents[4] / "scripts/compare_hccl_debug.py",
+        )
+        compare = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(compare)
+        a, b = self.recorder("inspect-a"), self.recorder("inspect-b")
+        for recorder, count in ((a, 1), (b, 2)):
+            recorder.stack.append({"root": ["decode", 0], "name": "dspark.accept"})
+            recorder.emit("before", {}, (), {"count": count})
+            recorder.emit("after", {"result": torch.tensor([count])}, ("result",), {})
+        self.assertEqual(
+            compare.compare_runs(a.directory.parent, b.directory.parent)[1], 2
+        )
+        inspection = compare.inspect_scopes(
+            b.directory.parent, ["dspark.accept"], limit=2
+        )
+        self.assertEqual(inspection["events"][1]["tensors"]["result"]["values"], [2])
+        self.assertFalse(
+            inspection["events"][1]["tensors"]["result"]["saved_file_exists"]
+        )
+        self.assertIn("unknown", inspection["accept_length_evidence"])
+        self.assertEqual(
+            compare.inspect_scopes(b.directory.parent, ["missing"])["matching_events"],
+            0,
+        )
+        self.assertEqual(
+            compare.inspect_scopes(b.directory.parent, ["dspark.accept"], limit=1)[
+                "omitted_events"
+            ],
+            1,
+        )
+        records = self.events(b)
+        records[0]["simulation"] = {"SGLANG_SIMULATE_ACC_LEN": 1.0}
+        b.path.write_text("\n".join(json.dumps(e) for e in records) + "\n")
+        self.assertIn(
+            "simulated",
+            compare.inspect_scopes(b.directory.parent, ["dspark.accept"])[
+                "accept_length_evidence"
+            ],
+        )
 
 
 if __name__ == "__main__":

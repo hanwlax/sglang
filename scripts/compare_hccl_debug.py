@@ -243,7 +243,7 @@ def compare_runs(left, right, *, tensors=False):
         if am.get("world_size") != bm.get("world_size"):
             report["incomplete"].append(f"rank {rank}: different topology")
             continue
-        for field in ("torch", "limits", "configuration", "graph_state"):
+        for field in ("torch", "limits", "configuration", "graph_state", "simulation"):
             if am.get(field) != bm.get(field):
                 report["incomplete"].append(f"rank {rank}: manifest {field} differs")
         entry["requested_modes"] = [
@@ -318,6 +318,106 @@ def compare_runs(left, right, *, tensors=False):
     return report, status
 
 
+def inspect_scopes(directory, scopes, rank=0, limit=16):
+    """Read each run independently; never align events across divergent states."""
+    runs = load_run(directory)
+    if rank not in runs:
+        raise ValueError(f"{directory}: missing inspection rank {rank}")
+    parent, manifest, records = runs[rank]
+    selected = [
+        e
+        for e in records
+        if e.get("type") == "snapshot" and any(s in e["scope"] for s in scopes)
+    ]
+    events = []
+    for event in selected[:limit]:
+        entry = {k: event[k] for k in ("event", "root", "scope", "edge", "metadata")}
+        entry["tensors"] = {}
+        for name, summary in event["tensors"].items():
+            entry["tensors"][name] = {
+                k: summary[k]
+                for k in (
+                    "shape",
+                    "dtype",
+                    "sha256",
+                    "values",
+                    "topk_indices",
+                    "topk_values",
+                    "dump_skipped",
+                )
+                if k in summary
+            }
+            entry["tensors"][name]["saved_file_exists"] = (
+                (parent / summary["file"]).is_file() if "file" in summary else False
+            )
+        events.append(entry)
+    simulation = manifest.get("simulation")
+    acc_len = (simulation or {}).get("SGLANG_SIMULATE_ACC_LEN")
+    return {
+        "rank": rank,
+        "simulation": simulation,
+        "accept_length_evidence": (
+            "unknown: old manifest; check launch environment"
+            if acc_len is None
+            else "simulated: final lengths are not real acceptance evidence"
+            if acc_len > 0
+            else "simulation disabled; still check request/state alignment"
+        ),
+        "matching_events": len(selected),
+        "omitted_events": max(0, len(selected) - limit),
+        "event_limit_reached": any(e.get("type") == "limit" for e in records),
+        "events": events,
+    }
+
+
+def brief_report(report):
+    """Keep all-rank status, omit repeated tensors and large expert counts."""
+    result = {k: report[k] for k in ("left_ranks", "right_ranks", "incomplete")}
+    result["rank_groups"] = []
+    groups = {}
+    for rank in report["ranks"]:
+        entry = {k: rank[k] for k in ("rank", "bitwise_different_tensors")}
+        diff = rank.get("first_difference")
+        if diff:
+            entry["first_difference"] = {
+                k: diff[k] for k in ("event", "root", "scope", "edge", "tensor")
+            }
+            if "numerical" in diff:
+                entry["first_difference"]["numerical"] = diff["numerical"]
+        mismatch = rank.get("alignment_mismatch")
+        if mismatch:
+            entry["alignment_mismatch"] = {
+                k: mismatch[k]
+                for k in ("left_event", "right_event", "left_key", "right_key")
+            }
+            a, b = mismatch["left_metadata"], mismatch["right_metadata"]
+            entry["alignment_mismatch"]["changed_metadata_fields"] = sorted(
+                k for k in a.keys() | b.keys() if a.get(k) != b.get(k)
+            )
+        member = entry.pop("rank")
+        key = json.dumps(entry, sort_keys=True)
+        if key not in groups:
+            groups[key] = {"ranks": [], **entry}
+            result["rank_groups"].append(groups[key])
+        groups[key]["ranks"].append(member)
+    if "allreduce_reference" in report:
+        ref = report["allreduce_reference"]
+        result["allreduce_reference"] = {k: v for k, v in ref.items() if k != "modes"}
+        result["allreduce_reference"]["modes"] = {}
+        for name, mode in ref["modes"].items():
+            # Collapse only AFTER the reference validated every group member.
+            result["allreduce_reference"]["modes"][name] = {
+                **mode,
+                "outputs": mode["outputs"][:1]
+                if mode["outputs_bitwise_equal_across_group"]
+                else mode["outputs"],
+            }
+    for key in ("allreduce_reference_error", "scope_inspection", "interpretation"):
+        if key in report:
+            result[key] = report[key]
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("left")
@@ -335,9 +435,42 @@ def main():
         help="Rank whose group selects the AllReduce reference (default: 0)",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="Short console JSON; --output still saves full report",
+    )
+    parser.add_argument(
+        "--inspect-scope",
+        action="append",
+        default=[],
+        help="Exact scope component to inspect independently per run; repeatable",
+    )
+    parser.add_argument("--inspect-rank", type=int, default=0)
+    parser.add_argument(
+        "--inspect-limit",
+        type=int,
+        default=16,
+        help="Max selected events per run (default: 16)",
+    )
     args = parser.parse_args()
+    if args.inspect_limit <= 0:
+        parser.error("--inspect-limit must be positive")
     try:
         report, status = compare_runs(args.left, args.right, tensors=args.tensors)
+        if args.inspect_scope:
+            report["scope_inspection"] = {
+                "interpretation": "Independent records, NOT aligned tensor pairs. Equal step numbers do not prove equal prefixes, cache state or valid rows.",
+                "left": inspect_scopes(
+                    args.left, args.inspect_scope, args.inspect_rank, args.inspect_limit
+                ),
+                "right": inspect_scopes(
+                    args.right,
+                    args.inspect_scope,
+                    args.inspect_rank,
+                    args.inspect_limit,
+                ),
+            }
         if args.allreduce_event is not None:
             try:
                 report["allreduce_reference"] = allreduce_reference(
@@ -351,7 +484,11 @@ def main():
     encoded = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
     if args.output:
         args.output.write_text(encoded + "\n")
-    print(encoded)
+    print(
+        json.dumps(brief_report(report), ensure_ascii=False, indent=2, allow_nan=False)
+        if args.brief
+        else encoded
+    )
     return status
 
 

@@ -216,6 +216,16 @@ def _get_recorder(create_if_missing=True):
             "hccl_op_expansion_mode_requested": os.getenv("HCCL_OP_EXPANSION_MODE"),
             "actual_hccl_engine": "unknown; consult HCCL logs",
             "graph_state": graph_state,
+            "simulation": {
+                name: getattr(envs, name).get()
+                for name in (
+                    "SGLANG_SIMULATE_ACC_LEN",
+                    "SGLANG_SIMULATE_ACC_METHOD",
+                    "SGLANG_SIMULATE_ACC_TOKEN_MODE",
+                    "SGLANG_SIMULATE_UNIFORM_EXPERTS",
+                    "SGLANG_SIMULATE_ROUND_ROBIN_EXPERTS",
+                )
+            },
             "configuration": {
                 name: getattr(args, name, None)
                 for name in (
