@@ -86,7 +86,7 @@ def compare_runs(left, right, *, tensors=False):
         if am.get("world_size") != bm.get("world_size"):
             report["incomplete"].append(f"rank {rank}: different topology")
             continue
-        for field in ("torch", "limits", "configuration"):
+        for field in ("torch", "limits", "configuration", "graph_state"):
             if am.get(field) != bm.get(field):
                 report["incomplete"].append(f"rank {rank}: manifest {field} differs")
         entry["requested_modes"] = [

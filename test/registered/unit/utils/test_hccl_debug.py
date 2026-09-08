@@ -4,12 +4,14 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from sglang.srt.environ import envs
+from sglang.srt.runtime_context import get_context, get_flags, get_resources
 from sglang.srt.utils import hccl_debug as debug
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -31,6 +33,56 @@ class TestHcclDebug(CustomTestCase):
 
     def events(self, recorder):
         return [json.loads(line) for line in recorder.path.read_text().splitlines()]
+
+    @contextmanager
+    def runtime_graph(self, decode="disabled", prefill="disabled", compile=False):
+        # Install separate raw input and resolved namespace fixtures on the
+        # actual context. Do not patch accessor bindings: that would miss the
+        # regression where production reads a different source of config.
+        graph = SimpleNamespace(
+            decode=SimpleNamespace(backend=decode),
+            prefill=SimpleNamespace(backend=prefill),
+        )
+        with (
+            patch.object(
+                get_context(),
+                "_server_args",
+                SimpleNamespace(cuda_graph_config=None, enable_torch_compile=True),
+            ),
+            patch.object(
+                get_context(),
+                "_config_bags",
+                {
+                    "exec": SimpleNamespace(
+                        graph=SimpleNamespace(cuda_graph_config=graph)
+                    )
+                },
+            ),
+            get_flags().capture.override(enable_torch_compile=compile),
+            get_resources().override(buffers={}),
+            envs.SGLANG_DEBUG_HCCL_DIR.override(self.tmp.name),
+        ):
+            yield
+
+    def test_resolved_eager_config_allows_raw_none(self):
+        with self.runtime_graph():
+            recorder = debug._get_recorder()
+            self.assertIs(debug._get_recorder(), recorder)
+            state = self.events(recorder)[0]["graph_state"]
+            self.assertEqual(state["decode_backend"], "disabled")
+            self.assertEqual(state["prefill_backend"], "disabled")
+            self.assertFalse(state["enable_torch_compile"])
+
+    def test_effective_graph_or_compile_still_rejected(self):
+        for config in (
+            {"decode": "full"},
+            {"prefill": "tc_piecewise"},
+            {"compile": True},
+        ):
+            with self.subTest(config=config), self.runtime_graph(**config):
+                with self.assertRaisesRegex(RuntimeError, "Effective runtime values"):
+                    debug._get_recorder()
+                self.assertFalse(get_resources().buffers)
 
     def test_bfloat16_noncontiguous_nonfinite_and_empty(self):
         tensor = torch.tensor(

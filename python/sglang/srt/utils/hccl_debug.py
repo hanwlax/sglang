@@ -170,24 +170,41 @@ class HcclDebugRecorder:
 
 def _get_recorder(create_if_missing=True):
     # Lazy imports avoid a parallel_state -> runtime_context import cycle.
-    from sglang.srt.runtime_context import get_buffer, get_resources, get_server_args
+    from sglang.srt.runtime_context import (
+        get_buffer,
+        get_exec,
+        get_flags,
+        get_resources,
+        get_server_args,
+    )
 
     if not create_if_missing:
         return get_resources().buffers.get("hccl_debug_recorder")
 
     def create():
         args = get_server_args()
-        graph = args.cuda_graph_config
+        # ServerArgs retains the operator's raw input on this branch. The
+        # runners consume the resolved namespace; raw cuda_graph_config can
+        # still be None even when both phase flags resolved to disabled.
+        graph = get_exec().graph.cuda_graph_config
+        graph_state = {
+            "decode_backend": getattr(getattr(graph, "decode", None), "backend", None),
+            "prefill_backend": getattr(
+                getattr(graph, "prefill", None), "backend", None
+            ),
+            "enable_torch_compile": get_flags().capture.enable_torch_compile,
+        }
         if (
-            graph is None
-            or graph.decode.backend != "disabled"
-            or graph.prefill.backend != "disabled"
-            or args.enable_torch_compile
+            graph_state["decode_backend"] != "disabled"
+            or graph_state["prefill_backend"] != "disabled"
+            or graph_state["enable_torch_compile"]
         ):
             raise RuntimeError(
                 "SGLANG_DEBUG_HCCL_DIR requires both "
                 "--cuda-graph-backend-decode disabled and "
-                "--cuda-graph-backend-prefill disabled, without torch.compile"
+                "--cuda-graph-backend-prefill disabled, without torch.compile. "
+                f"Effective runtime values: {graph_state}. "
+                "An explicit --cuda-graph-config overrides the per-phase flags."
             )
         dist = torch.distributed
         rank = dist.get_rank() if dist.is_initialized() else 0
@@ -198,6 +215,7 @@ def _get_recorder(create_if_missing=True):
             "torch": torch.__version__,
             "hccl_op_expansion_mode_requested": os.getenv("HCCL_OP_EXPANSION_MODE"),
             "actual_hccl_engine": "unknown; consult HCCL logs",
+            "graph_state": graph_state,
             "configuration": {
                 name: getattr(args, name, None)
                 for name in (

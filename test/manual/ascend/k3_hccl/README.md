@@ -41,6 +41,12 @@ DeepEP 和 DSPARK block size 7。第一轮数值对照在 **两组** 启动命�
 此轮只用于数值定位，不能据此证明原图模式或异步路径没有问题。
 DeepEP 内部传输/量化并不等于普通 HCCL collective；其调用边界单独记录。
 
+关图检查读取执行器使用的 `get_exec().graph.cuda_graph_config` 和运行时
+compile 标志；`get_server_args()` 在此分支保留原始输入，不能用其
+`cuda_graph_config=None` 判断图是否开启。旧提交 `3521625c44` 的检查误读了
+该原始字段，已关图仍可能报错，需同步后续修复。新报错会打印生效值；
+如仍有某阶段未关闭，检查显式 `--cuda-graph-config` 是否覆盖了阶段开关。
+
 单机 TP8 裁层对照还需将原命令调整为 `--nnodes 1 --node-rank 0
 --tp-size 8 --dp-size 1`，使用本机的 `--dist-init-addr`，并让脚本进入单机
 启动路径（原脚本按四机 IP 匹配）。模型路径使用已准备好的裁层权重。
