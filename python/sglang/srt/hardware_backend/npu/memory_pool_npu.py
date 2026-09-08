@@ -760,11 +760,11 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
         def scatter(cache: torch.Tensor, values: torch.Tensor, head_dim: int):
             num_tiles = head_dim // 16
             if cache.device.type == "npu":
-                from sglang.kernels.ops.kvcache.triton_mla_nz_indices import (
-                    build_mla_nz_indices,
+                from sglang.srt.hardware_backend.npu.attention.mla_cache import (
+                    get_mla_nz_indices,
                 )
 
-                indices = build_mla_nz_indices(
+                indices = get_mla_nz_indices(
                     loc, self.page_size, head_dim, cache.shape[0]
                 ).view(-1, 1)
             else:

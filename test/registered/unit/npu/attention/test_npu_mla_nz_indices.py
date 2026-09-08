@@ -2,15 +2,21 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch_npu  # noqa: F401
 from sglang.kernels.ops.kvcache.triton_mla_nz_indices import build_mla_nz_indices
-from sglang.srt.hardware_backend.npu.attention.mla_cache import gather_mla_cache_pages
+from sglang.srt.hardware_backend.npu.attention.mla_cache import (
+    gather_mla_cache_pages,
+    get_mla_nz_indices,
+    with_mla_nz_index_cache,
+)
 from sglang.srt.hardware_backend.npu.memory_pool_npu import (
     NPUMLATokenToKVPool,
     _mla_fia_nz_scatter_indices,
 )
+from sglang.srt.runtime_context import get_forward
 from sglang.test.ci.ci_register import register_npu_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -106,9 +112,14 @@ class TestMLANZIndices(CustomTestCase):
         loc = torch.tensor([127, 128, 255, 256], device=self.device, dtype=torch.int32)
         backing = torch.randn(4, 1, 576, device=self.device, dtype=pool.dtype)
 
+        @with_mla_nz_index_cache
         def write():
             pool.set_kv_buffer(SimpleNamespace(layer_id=13), loc, backing, None)
+            # A second layer must read the same captured index producers.
+            pool.set_kv_buffer(SimpleNamespace(layer_id=14), loc, backing, None)
 
+        pool.k_buffer = pool.k_buffer.repeat(2, 1, 1, 1, 1)
+        pool.v_buffer = pool.v_buffer.repeat(2, 1, 1, 1, 1)
         write()
         torch.npu.synchronize()
         graph = torch.npu.NPUGraph()
@@ -129,6 +140,71 @@ class TestMLANZIndices(CustomTestCase):
             for ref, value in zip(refs, values.split([512, 64], dim=-1)):
                 ref.view(-1, 1, ref.shape[-1])[slots] = value
             self._assert_cache(pool, refs)
+            self.assertTrue(torch.equal(pool.k_buffer[0], pool.k_buffer[1]))
+            self.assertTrue(torch.equal(pool.v_buffer[0], pool.v_buffer[1]))
+
+    def test_shared_indices_scopes_and_mutations(self):
+        loc = torch.tensor([127, 128, 255], device=self.device, dtype=torch.int32)
+
+        def get():
+            return get_mla_nz_indices(loc, 128, 512, 4)
+
+        with patch(
+            "sglang.kernels.ops.kvcache.triton_mla_nz_indices.build_mla_nz_indices",
+            wraps=build_mla_nz_indices,
+        ) as build:
+            with get_forward().scoped(npu_mla_nz_indices={}):
+                first = get()
+                for _ in range(23):
+                    self.assertIs(get(), first)
+                self.assertEqual(build.call_count, 1)
+                with (
+                    self.assertRaisesRegex(RuntimeError, "nested"),
+                    get_forward().scoped(npu_mla_nz_indices={}),
+                ):
+                    self.assertIsNot(get(), first)
+                    raise RuntimeError("nested")
+                self.assertIs(get(), first)
+                loc.add_(1)
+                self.assertIsNot(get(), first)
+            self.assertIsNone(get_forward().npu_mla_nz_indices)
+            self.assertIsNot(get(), first)
+            self.assertEqual(build.call_count, 4)
+
+    @torch.inference_mode()
+    def test_inference_locations_refresh_each_forward(self):
+        loc = torch.tensor([127, 128, 255], device=self.device, dtype=torch.int32)
+
+        @with_mla_nz_index_cache
+        def run():
+            return get_mla_nz_indices(loc, 128, 512, 4)
+
+        first = run()
+        loc.add_(1)
+        second = run()
+        self.assertIsNot(first, second)
+        expected = _mla_fia_nz_scatter_indices(loc.cpu().long(), 512, 128).flatten()
+        self.assertTrue(torch.equal(second.cpu(), expected))
+
+    def test_streams_do_not_share_producers(self):
+        loc = torch.tensor([127, 128, 255], device=self.device, dtype=torch.int32)
+        torch.npu.synchronize()
+        stream = torch.npu.Stream()
+        with get_forward().scoped(npu_mla_nz_indices={}):
+            first = get_mla_nz_indices(loc, 128, 512, 4)
+            with torch.npu.stream(stream):
+                second = get_mla_nz_indices(loc, 128, 512, 4)
+        torch.npu.synchronize()
+        self.assertIsNot(first, second)
+        self.assertTrue(torch.equal(first.cpu(), second.cpu()))
+
+    def test_compile_bypasses_contextvars(self):
+        @with_mla_nz_index_cache
+        def run(x):
+            return x + 1
+
+        compiled = torch.compile(run, backend="eager", fullgraph=True)
+        self.assertTrue(torch.equal(compiled(torch.zeros(2)), torch.ones(2)))
 
 
 if __name__ == "__main__":

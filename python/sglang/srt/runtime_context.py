@@ -591,6 +591,9 @@ class ForwardFlags:
     _DEFAULTS = {
         "multi_stream": False,
         "moe_output_buffer": None,
+        # Eager NPU model forward / NPUGraph capture only. Each model call
+        # installs a fresh map; compiled forwards keep per-layer generation.
+        "npu_mla_nz_indices": None,
         # Attention-TP input-scattering (set per forward by
         # AttnTpContext.maybe_input_scattered / set_attn_inputs).
         "attn_input_scattered": False,

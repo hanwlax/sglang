@@ -139,6 +139,11 @@ _is_hip = is_hip()
 _is_npu = is_npu()
 _aiter_k3_opt = get_bool_env_var("SGLANG_AITER_K3_OPT")
 
+if _is_npu:
+    from sglang.srt.hardware_backend.npu.attention.mla_cache import (
+        with_mla_nz_index_cache,
+    )
+
 
 def _cdiv(a: int, b: int) -> int:
     return (a + b - 1) // b
@@ -2865,6 +2870,9 @@ class KimiK3LinearModel(nn.Module):
         if self.dspark_layers_to_capture is not None:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    if _is_npu:
+        forward = with_mla_nz_index_cache(forward)
 
     def _dspark_capture_stream(
         self,
