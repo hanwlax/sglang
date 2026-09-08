@@ -90,6 +90,23 @@ class TestMLANZIndices(CustomTestCase):
             expected = _mla_fia_nz_scatter_indices(slots, 512, 128).flatten()
             self.assertTrue(torch.equal(actual.cpu(), expected))
 
+    def test_token_counts_share_compiled_kernel(self):
+        from sglang.kernels.ops.kvcache.triton_mla_nz_indices import (
+            _mla_nz_indices_kernel,
+        )
+
+        loc = torch.arange(256, device=self.device, dtype=torch.int32)
+        out = torch.empty(256 * 32, device=self.device, dtype=torch.int64)
+        hashes = set()
+        for count in (1, 7, 48, 65, 88, 128, 255):
+            compiled = _mla_nz_indices_kernel[((count * 32 + 255) // 256,)](
+                loc, out, count, 128, 7, 32, 1, True, 256
+            )
+            hashes.add(compiled.hash)
+            expected = _mla_fia_nz_scatter_indices(loc[:count].cpu().long(), 512, 128)
+            self.assertTrue(torch.equal(out[: count * 32].cpu(), expected.flatten()))
+        self.assertEqual(len(hashes), 1)
+
     def test_pool_partial_writes_and_prefix_reads(self):
         pool = self._pool()
         refs = [

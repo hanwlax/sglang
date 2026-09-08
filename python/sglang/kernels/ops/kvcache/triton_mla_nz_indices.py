@@ -5,11 +5,11 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _mla_nz_indices_kernel(
     loc,
     out,
-    N: tl.constexpr,
+    N,
     PAGE_SIZE: tl.constexpr,
     PAGE_SHIFT: tl.constexpr,
     TILES: tl.constexpr,
@@ -38,8 +38,9 @@ def _mla_nz_indices_kernel(
 def build_mla_nz_indices(loc, page_size, head_dim, num_blocks):
     """Return 16-element-row indices for [page, dim//16, page_size, 16].
 
-    Device locations remain runtime inputs to graph replay. Only tensor shapes
-    and cache bounds specialize the kernel. Valid slots fit the supplied cache;
+    Device locations remain runtime inputs to graph replay. The token count is
+    a non-specialized scalar, so different prefill tails share one binary for
+    each layout/index-width combination. Valid slots fit the supplied cache;
     retain int64 arithmetic when its row indices can exceed signed int32.
     """
     if head_dim <= 0 or head_dim % 16:
