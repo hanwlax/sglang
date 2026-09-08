@@ -7,6 +7,7 @@ local write-chain timings, not serving TPOT or distributed critical-path time.
 
 import argparse
 import json
+import math
 import statistics
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ def percentile(values, fraction):
 
 def benchmark(args, rows):
     pool = NPUMLATokenToKVPool.__new__(NPUMLATokenToKVPool)
+    pool.use_triton_nz_store = False
     pool.start_layer, pool.page_size = 0, 128
     pool.kv_lora_rank, pool.qk_rope_head_dim = 512, 64
     pool.k_buffer, pool.v_buffer = [
@@ -35,9 +37,14 @@ def benchmark(args, rows):
         )
         for d in (512, 64)
     ]
-    if rows > args.pages * 128:
-        raise ValueError("rows exceed cache capacity")
-    loc = torch.arange(rows, dtype=torch.int32, device="npu")
+    capacity = args.pages * 128
+    if args.slot_stride < 1 or rows > capacity // math.gcd(capacity, args.slot_stride):
+        raise ValueError("rows/slot-stride would produce duplicate cache locations")
+    loc = (
+        torch.arange(rows, dtype=torch.int32, device="npu")
+        * args.slot_stride
+        % capacity
+    )
     values = torch.randn(rows, 1, 576, device="npu", dtype=torch.bfloat16)
     k, r = values.split([512, 64], dim=-1)
 
@@ -49,7 +56,8 @@ def benchmark(args, rows):
                     buf[layer].view(-1, 16), indices, src.contiguous().view(-1, 16)
                 )
 
-    def write(shared):
+    def write(shared, direct=False):
+        pool.use_triton_nz_store = direct
         with get_forward().scoped(npu_mla_nz_indices={} if shared else None):
             for layer in range(args.layers):
                 pool._set_fia_nz_kv_buffer(layer, loc, k, r)
@@ -58,8 +66,15 @@ def benchmark(args, rows):
         "native": native,
         "fused": lambda: write(False),
         "shared": lambda: write(True),
+        "direct": lambda: write(False, direct=True),
     }
-    report = {"rows": rows, "layers": args.layers, "pages": args.pages, "modes": {}}
+    report = {
+        "rows": rows,
+        "layers": args.layers,
+        "pages": args.pages,
+        "slot_stride": args.slot_stride,
+        "modes": {},
+    }
     for mode in ("eager", "graph"):
         runs = {}
         for name, fn in functions.items():
@@ -74,7 +89,7 @@ def benchmark(args, rows):
             else:
                 runs[name] = fn
         # Keep the same slots/values for each paired round. Rotate order to
-        # distribute cache/frequency drift across all three implementations.
+        # distribute cache/frequency drift across all implementations.
         samples = {name: [] for name in runs}
         for group in range(args.groups):
             names = list(runs)
@@ -125,6 +140,7 @@ if __name__ == "__main__":
     parser.add_argument("--rows", nargs="+", type=int, default=[48, 88, 128])
     parser.add_argument("--layers", type=int, default=24)
     parser.add_argument("--pages", type=int, default=64)
+    parser.add_argument("--slot-stride", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--groups", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=10)

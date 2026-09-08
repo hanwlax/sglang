@@ -36,6 +36,7 @@ class TestMLANZIndices(CustomTestCase):
         pool.start_layer, pool.page_size = 13, 128
         pool.kv_lora_rank, pool.qk_rope_head_dim = 512, 64
         pool.use_fia_nz = True
+        pool.use_triton_nz_store = False
         pool.k_buffer = torch.zeros(
             1, 4, 128, 1, 512, device=self.device, dtype=pool.dtype
         )
@@ -108,7 +109,13 @@ class TestMLANZIndices(CustomTestCase):
         self.assertEqual(len(hashes), 1)
 
     def test_pool_partial_writes_and_prefix_reads(self):
+        for direct in (False, True):
+            with self.subTest(direct=direct):
+                self._check_pool_writes(direct)
+
+    def _check_pool_writes(self, direct):
         pool = self._pool()
+        pool.use_triton_nz_store = direct
         refs = [
             torch.zeros_like(buf[0], device="cpu")
             for buf in (pool.k_buffer, pool.v_buffer)
@@ -125,7 +132,13 @@ class TestMLANZIndices(CustomTestCase):
             self._assert_cache(pool, refs)
 
     def test_graph_replay_updates_locations_and_values(self):
+        for direct in (False, True):
+            with self.subTest(direct=direct):
+                self._check_graph_replay(direct)
+
+    def _check_graph_replay(self, direct):
         pool = self._pool()
+        pool.use_triton_nz_store = direct
         loc = torch.tensor([127, 128, 255, 256], device=self.device, dtype=torch.int32)
         backing = torch.randn(4, 1, 576, device=self.device, dtype=pool.dtype)
 
@@ -159,6 +172,44 @@ class TestMLANZIndices(CustomTestCase):
             self._assert_cache(pool, refs)
             self.assertTrue(torch.equal(pool.k_buffer[0], pool.k_buffer[1]))
             self.assertTrue(torch.equal(pool.v_buffer[0], pool.v_buffer[1]))
+
+    def test_direct_store_strides_dtypes_pages_and_tails(self):
+        from sglang.kernels.ops.kvcache.triton_mla_nz_store import store_mla_nz_cache
+
+        for dtype in (torch.float16, torch.bfloat16):
+            for page_size in (16, 96, 128):
+                for count in (0, 1, 65, 128, 4096):
+                    with self.subTest(dtype=dtype, page_size=page_size, N=count):
+                        pages = (max(count, 1) * 2 + page_size - 1) // page_size
+                        # Odd-numbered slots and untouched even rows expose
+                        # masked tails and writes that cross a destination row.
+                        slots = torch.arange(count * 2, dtype=torch.int64)[1::2]
+                        loc = torch.arange(
+                            count * 2, device=self.device, dtype=torch.int64
+                        )[1::2]
+                        values = torch.randn(count, 1, 1152, dtype=dtype)
+                        src = values.to(self.device)[:, :, ::2]
+                        buffers = [
+                            torch.zeros(
+                                pages, page_size, 1, d, device=self.device, dtype=dtype
+                            )
+                            for d in (512, 64)
+                        ]
+                        store_mla_nz_cache(
+                            loc, src[:, :, :512], src[:, :, 512:], *buffers, page_size
+                        )
+                        for cache, source in zip(
+                            buffers, values[:, :, ::2].split([512, 64], dim=-1)
+                        ):
+                            logical = torch.zeros_like(cache, device="cpu")
+                            logical.view(-1, 1, cache.shape[-1])[slots] = source
+                            expected = (
+                                logical.reshape(pages, page_size, -1, 16)
+                                .permute(0, 2, 1, 3)
+                                .contiguous()
+                                .reshape_as(logical)
+                            )
+                            self.assertTrue(torch.equal(cache.cpu(), expected))
 
     def test_shared_indices_scopes_and_mutations(self):
         loc = torch.tensor([127, 128, 255], device=self.device, dtype=torch.int32)

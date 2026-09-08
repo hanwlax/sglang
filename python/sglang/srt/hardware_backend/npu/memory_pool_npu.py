@@ -570,6 +570,7 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
         # write into the NZ-addressed view below so ordinary MLA (including
         # Kimi-K3 MTP) can use FIA NZ without MLAPO.
         self.use_fia_nz = get_bool_env_var("SGLANG_USE_FIA_NZ")
+        self.use_triton_nz_store = envs.SGLANG_NPU_USE_TRITON_MLA_NZ_STORE.get()
         super(MLATokenToKVPool, self).__init__(
             size=size,
             page_size=page_size,
@@ -757,6 +758,26 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
         if loc.numel() == 0:
             return
 
+        offset = layer_id - self.start_layer
+        if (
+            self.use_triton_nz_store
+            and self.k_buffer[offset].device.type == "npu"
+            and cache_k.dtype in (torch.float16, torch.bfloat16)
+        ):
+            from sglang.kernels.ops.kvcache.triton_mla_nz_store import (
+                store_mla_nz_cache,
+            )
+
+            store_mla_nz_cache(
+                loc,
+                cache_k,
+                cache_v,
+                self.k_buffer[offset],
+                self.v_buffer[offset],
+                self.page_size,
+            )
+            return
+
         def scatter(cache: torch.Tensor, values: torch.Tensor, head_dim: int):
             num_tiles = head_dim // 16
             if cache.device.type == "npu":
@@ -775,7 +796,6 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
             src = values.contiguous().view(-1, num_tiles, 16).view(-1, 16)
             torch_npu.npu_scatter_nd_update_(dst, indices, src)
 
-        offset = layer_id - self.start_layer
         scatter(self.k_buffer[offset], cache_k, self.kv_lora_rank)
         scatter(self.v_buffer[offset], cache_v, self.qk_rope_head_dim)
 
