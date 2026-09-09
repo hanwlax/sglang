@@ -1,92 +1,84 @@
-"""Real-device ND/NZ paged MLA prefill smoke test; no model weights needed.
+"""Real A5 V1/V2 prefill parity with 12 heads; no model weights required.
 
-Run in the deployment's A5/CANN/torch_npu environment:
-    PYTHONPATH=python python test/manual/npu/test_k3_mla_prefill_v2.py
-This tests the attention call, not end-to-end K3 accuracy or distributed hangs.
+PYTHONPATH=python python test/manual/npu/test_k3_mla_prefill_v2.py
+Includes the reported Q=6528, KV=133760, Q/K D=192, V D=128 case.
+This is a correctness test, not a performance benchmark or K3 model eval.
 """
 
 import unittest
 
 import torch
 import torch_npu  # noqa: F401
-from sglang.srt.hardware_backend.npu.attention.mla_prefill import fias_v2_mla_prefill
+from sglang.srt.hardware_backend.npu.attention.mla_prefill import fias_mha_prefill_v2
 from sglang.test.test_utils import CustomTestCase
 
 
-def pack_nz(cache):
-    blocks, page, _, dim = cache.shape
-    return (
-        cache.reshape(blocks, page, dim // 16, 16)
-        .permute(0, 2, 1, 3)
-        .contiguous()
-        .reshape_as(cache)
-    )
-
-
 class TestK3MLAPrefillV2NPU(CustomTestCase):
-    def test_cold_and_cached_variable_length_prefill(self):
+    def check_pair(self, q, k, v, **kwargs):
+        v1 = torch.ops.npu.npu_fused_infer_attention_score(q, k, v, **kwargs)[0]
+        v2 = fias_mha_prefill_v2(q, k, v, **kwargs)[0]
+        torch.npu.synchronize()
+        self.assertEqual(v2.shape, v1.shape)
+        self.assertTrue(torch.isfinite(v2).all().item())
+        torch.testing.assert_close(v2, v1, atol=2e-3, rtol=2e-2)
+        return v2.cpu()
+
+    def params(self, layout):
+        return {
+            "num_heads": 12,
+            "num_key_value_heads": 12,
+            "input_layout": layout,
+            "atten_mask": torch.ones(2048, 2048, dtype=torch.bool).triu(1).npu(),
+            "sparse_mode": 3,
+            "scale": 0.125,
+            "next_tokens": 0,
+        }
+
+    def test_small_cached_against_fp32(self):
         torch.manual_seed(42)
-        page = 128
         for dtype in (torch.bfloat16, torch.float16):
-            # Small cold prefill, then the 128K-prefix shape including a
-            # zero-length row and one-token tail. Each case has DP padding.
-            for q_lens, kv_lens in (
-                ([256, 17, 1], [256, 17, 1]),
-                ([17, 0, 1], [128017, 128000, 128001]),
-            ):
-                blocks = (max(kv_lens) + page - 1) // page
-                cache = torch.randn(blocks, page, 1, 512, dtype=dtype) * 0.1
-                rope = torch.randn(blocks, page, 1, 64, dtype=dtype) * 0.1
-                table = torch.stack([torch.randperm(blocks) for _ in q_lens]).int()
-                q = torch.randn(sum(q_lens) + 2, 4, 512, dtype=dtype) * 0.1
-                qr = torch.randn(sum(q_lens) + 2, 4, 64, dtype=dtype) * 0.1
-                expected = torch.zeros_like(q)
-                offset = 0
-                for row, (ql, kl) in enumerate(zip(q_lens, kv_lens)):
-                    if ql == 0:
-                        continue
-                    k = cache[table[row].long()].reshape(-1, 512)[:kl].float()
-                    kr = rope[table[row].long()].reshape(-1, 64)[:kl].float()
-                    scores = (
-                        q[offset : offset + ql].float().transpose(0, 1) @ k.T
-                        + qr[offset : offset + ql].float().transpose(0, 1) @ kr.T
-                    ) * 0.1
-                    allowed = (
-                        torch.arange(kl)[None, :]
-                        <= (kl - ql + torch.arange(ql))[:, None]
-                    )
-                    expected[offset : offset + ql] = (
-                        (scores.masked_fill(~allowed, float("-inf")).softmax(-1) @ k)
-                        .transpose(0, 1)
-                        .to(dtype)
-                    )
-                    offset += ql
-                q_npu, qr_npu = q.npu(), qr.npu()
-                table_npu = table.npu()
-                mask = torch.ones(2048, 2048, dtype=torch.bool).triu(1).npu()
-                outputs = []
-                for nz in (False, True):
-                    with self.subTest(dtype=dtype, q_lens=q_lens, nz=nz):
-                        k = (pack_nz(cache) if nz else cache).npu()
-                        kr = (pack_nz(rope) if nz else rope).npu()
-                        out = fias_v2_mla_prefill(
-                            q_npu,
-                            qr_npu,
-                            k,
-                            kr,
-                            query_lens=q_lens,
-                            kv_lens=kv_lens,
-                            block_table=table_npu,
-                            page_size=page,
-                            scale=0.1,
-                            mask=mask,
-                            is_nz=nz,
-                        ).cpu()
-                        self.assertTrue(torch.isfinite(out).all().item())
-                        torch.testing.assert_close(out, expected, atol=2e-3, rtol=2e-2)
-                        self.assertEqual(out[-2:].count_nonzero().item(), 0)
-                        outputs.append(out)
-                torch.testing.assert_close(outputs[0], outputs[1], atol=2e-3, rtol=2e-2)
+            q = torch.randn(1, 17, 12, 192, dtype=dtype) * 0.1
+            k = torch.randn(1, 273, 12, 192, dtype=dtype) * 0.1
+            v = torch.randn(1, 273, 12, 128, dtype=dtype) * 0.1
+            scores = (
+                q.float().transpose(1, 2) @ k.float().transpose(1, 2).transpose(-1, -2)
+            ) * 0.125
+            allowed = torch.arange(273)[None, :] <= (256 + torch.arange(17))[:, None]
+            expected = (
+                (
+                    scores.masked_fill(~allowed, float("-inf")).softmax(-1)
+                    @ v.float().transpose(1, 2)
+                )
+                .transpose(1, 2)
+                .to(dtype)
+            )
+            actual = self.check_pair(q.npu(), k.npu(), v.npu(), **self.params("BSND"))
+            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-2)
+
+    def test_cold_tnd_ragged_and_suffix(self):
+        torch.manual_seed(43)
+        q = (torch.randn(25, 12, 192, dtype=torch.bfloat16) * 0.1).npu()
+        k = (torch.randn(25, 12, 192, dtype=torch.bfloat16) * 0.1).npu()
+        v = (torch.randn(25, 12, 128, dtype=torch.bfloat16) * 0.1).npu()
+        self.check_pair(
+            q[..., :128],
+            k[..., :128].contiguous(),
+            v,
+            query_rope=q[..., 128:],
+            key_rope=k[..., 128:].contiguous(),
+            actual_seq_lengths=[8, 25],
+            actual_seq_lengths_kv=[8, 25],
+            **self.params("TND"),
+        )
+
+    def test_reported_long_prefill_shape(self):
+        # About 1.1GB of inputs plus operator workspaces; no padded heads.
+        torch.manual_seed(44)
+        q = torch.randn(1, 6528, 12, 192, dtype=torch.bfloat16, device="npu") * 0.1
+        k = torch.randn(1, 133760, 12, 192, dtype=torch.bfloat16, device="npu") * 0.1
+        v = torch.randn(1, 133760, 12, 128, dtype=torch.bfloat16, device="npu") * 0.1
+        result = self.check_pair(q, k, v, **self.params("BSND"))
+        self.assertEqual(result.shape, (1, 6528, 12, 128))
 
 
 if __name__ == "__main__":

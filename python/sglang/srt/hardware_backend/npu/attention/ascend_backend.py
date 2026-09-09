@@ -17,6 +17,7 @@ from sglang.srt.hardware_backend.npu.attention.ascend_torch_native_backend impor
     AscendTorchNativeAttnBackend,
 )
 from sglang.srt.hardware_backend.npu.attention.mla_cache import gather_mla_cache_pages
+from sglang.srt.hardware_backend.npu.attention.mla_prefill import fias_mha_prefill_v2
 from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
     is_fia_nz,
     is_mla_preprocess_enabled,
@@ -1234,33 +1235,13 @@ class AscendAttnBackend(AttentionBackend):
                 sinks=sinks,
             )
 
-        if (
-            self.use_mla
-            and q_rope is not None
-            and envs.SGLANG_NPU_USE_FIAS_V2_PREFILL.get()
-        ):
-            from sglang.srt.hardware_backend.npu.attention.mla_prefill import (
-                fias_v2_mla_prefill,
-            )
-
-            # The prefill prepare path has already written through the pool
-            # (including hybrid layer translation). Read the same persistent
-            # latent cache as decode/verify, without gathering/expanding it.
-            c_kv, k_pe = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
-            attn_output = fias_v2_mla_prefill(
-                q.reshape(-1, layer.tp_q_head_num, self.kv_lora_rank),
-                q_rope.reshape(-1, layer.tp_q_head_num, self.qk_rope_head_dim),
-                c_kv,
-                k_pe,
-                query_lens=forward_batch.extend_seq_lens_cpu,
-                kv_lens=self.forward_metadata.seq_lens_cpu_int.tolist(),
-                block_table=self.forward_metadata.block_tables,
-                page_size=self.page_size,
-                scale=layer.scaling,
-                mask=self.fia_mask,
-                is_nz=is_fia_nz(),
-            )
-            return attn_output.reshape(-1, layer.tp_q_head_num * self.kv_lora_rank)
+        # Substitute only the API at the expanded MLA prefill call sites.
+        # Keep projections, real heads, prefix gather, layouts and lengths.
+        prefill_fia = (
+            fias_mha_prefill_v2
+            if envs.SGLANG_NPU_USE_FIAS_V2_PREFILL.get()
+            else torch.ops.npu.npu_fused_infer_attention_score
+        )
 
         if not self.use_mla:
             # Detect CP mode for prefill (context parallel)
@@ -1718,7 +1699,7 @@ class AscendAttnBackend(AttentionBackend):
                 v_full = torch.cat([v_pre_slice, v_cur_slice], dim=1)
 
                 attn_output[q_len_offset : q_len_offset + q_len] = (
-                    torch.ops.npu.npu_fused_infer_attention_score(
+                    prefill_fia(
                         q[None, q_len_offset : q_len_offset + q_len],
                         k_full,
                         v_full,
@@ -1748,7 +1729,7 @@ class AscendAttnBackend(AttentionBackend):
                 q_len_offset = 0
                 for q_len in forward_batch.extend_seq_lens_cpu:
                     attn_output[q_len_offset : q_len_offset + q_len] = (
-                        torch.ops.npu.npu_fused_infer_attention_score(
+                        prefill_fia(
                             q[None, q_len_offset : q_len_offset + q_len],
                             k[None, q_len_offset : q_len_offset + q_len],
                             v[None, q_len_offset : q_len_offset + q_len].contiguous(),
@@ -1808,7 +1789,7 @@ class AscendAttnBackend(AttentionBackend):
                     [layer.v_head_dim, self.qk_rope_head_dim], dim=-1
                 )
 
-                attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                attn_output, _ = prefill_fia(
                     q_nope,
                     k_nope.contiguous(),
                     v.contiguous(),

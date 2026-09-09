@@ -2240,15 +2240,6 @@ class KimiK3MLAAttention(DeepseekV2AttentionMLA):
         method = super().dispatch_attn_forward_method(forward_batch)
         if getattr(self, "_kimi_split_gguf_kv_b", False):
             return AttnForwardMethod.MLA
-        if (
-            method == AttnForwardMethod.MHA_NPU
-            and envs.SGLANG_NPU_USE_FIAS_V2_PREFILL.get()
-        ):
-            if forward_batch.attn_cp_metadata is not None:
-                raise NotImplementedError(
-                    "K3 FIAS V2 prefill does not support context parallelism"
-                )
-            return AttnForwardMethod.MLA_NPU
         return method
 
     def _precompute_output_gate(self, hidden_states: torch.Tensor) -> None:

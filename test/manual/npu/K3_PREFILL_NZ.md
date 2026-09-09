@@ -1,62 +1,56 @@
-# K3 paged NZ + FIAS V2 prefill
+# K3 FIAS V2 prefill: P0 correction
 
-Base: `zzx/a5-k3-0828` at `13e5168c684858c3849709c2bf75c5e42564311b`.
+Base: zzx/a5-k3-0828 at `13e5168c684858c3849709c2bf75c5e42564311b`.
+Branch: mine/prefill-nz.
 
-This opt-in path changes **Kimi-K3 target prefill**, not draft MHA, KDA,
-target verify, decode, DeepEP, graph-update ordering, or the NZ scatter kernel.
-It preserves the existing prefill Q/KV projection, RMSNorm and pool write.
-Instead of expanding the latent prefix with `kv_b_proj`, it computes
-`Q_nope @ W_kc`, reads the paged latent cache directly with FIAS V2, then
-uses the existing MLA core's `W_vc` and output projection/gate.
-The 64-dimensional K3 skip-RoPE suffix still participates in attention.
-This moves matrix products and changes floating-point rounding; mathematical
-equivalence and CPU tests do not establish model-level numerical parity.
+## What changed after the first implementation
 
-## Enable
+The first commit `64d1c2ae8d` routed prefill through latent MLA and padded
+12 heads to 16. A5 profiling reported FIAS growing from 18.185ms to 101.980ms:
+the original expanded Q/K D=192, V D=128 became Q/K D=512+64, V D=512.
+That was an algorithm/shape change, not an API-only V1/V2 comparison.
+It is removed by this P0 fix, including the unused latent-prefill helper.
 
-Apply on every server node, before launching the existing service script:
+The K3 model dispatcher and NPU attention preparation are restored to the base.
+The prefill flag now ONLY substitutes the V2 API at the existing expanded-MHA
+FIAS call sites in AscendAttnBackend (cached and cold MLA-model prefill).
+No head padding, latent Q absorption, new W_vc multiply, or paged-latent
+FIAS call is introduced.
+
+- Cached prefill keeps BSND Q/K=192, V=128 and the original head count.
+- Cold prefill keeps the original TND split Q/K=128 + suffix64, V=128,
+  cumulative sequence lengths, and DP padding handling.
+- Q/KV projection, norms, cache writes, prefix gather/unpack and KV expansion
+  are the original code paths. There is no new graph ordering or stream.
+- Existing decode, target verify, draft, KDA, DeepEP and their V2 controls
+  are unchanged. Non-FIAS/native and CP paths are not newly adapted.
+- The existing prefill flag also applies to these same expanded MLA-model
+  backend call sites for other models; it does not change model routing.
+
+## Startup
+
+Keep the existing launch command. On every node, to test only prefill V2:
 
 ```bash
-export ASCEND_USE_FIA=1
-export SGLANG_USE_FIA_NZ=1
 export SGLANG_NPU_USE_FIAS_V2_PREFILL=1
-export SGLANG_NPU_USE_FIAS_V2_BSND=1  # existing DSpark verify/draft V2
+export SGLANG_USE_FIA_NZ=0
 export SGLANG_NPU_USE_MLAPO=0
 ```
 
-Unlike older forks discussed in the incident, **this zzx base already decouples
-NZ from MLAPO**. Enabling full MLAPO is not required and its generic K3
-compatibility is not fixed by this patch. The new prefill preparation bypasses
-MLAPO, but existing decode/verify code is intentionally unchanged.
+Keep `SGLANG_NPU_USE_FIAS_V2_BSND` at your baseline value; it independently
+controls the existing verify/draft V2 paths, not this prefill fix.
+Setting the prefill flag to 0 selects the original V1 API with the same MHA math.
 
-`SGLANG_NPU_USE_FIAS_V2_PREFILL=0` restores the original prefill route while
-retaining NZ and the existing verify/draft choice. Setting NZ=0 with the new
-prefill flag still exercises V2 over ND latent cache for a layout-only A/B.
-Keep all other settings/model weights fixed. Restart between cache-layout changes.
+NZ may separately be enabled with `SGLANG_USE_FIA_NZ=1`. This base already
+decouples NZ from MLAPO. Important: NZ is the persistent latent cache layout;
+the prefill prefix reader unpacks it and expands K/V before FIAS. Therefore
+the corrected prefill FIAS inputs are ND even with NZ cache enabled.
+This fix does NOT promise direct NZ prefill FIAS or a performance improvement.
+Restart all nodes between changes; do not mix layouts or code versions.
 
-## Layout and scope
+## Verification
 
-- Query per request: BNSD `[1, padded_local_heads, actual_chunk_tokens, 512]`.
-  Head padding is zero-initialized and discarded. Query suffix D=64.
-- KV: the persistent NZ storage is viewed as
-  `[pages, 1, D/16, page_size, 16]`; no full-prefix gather or reorder is needed.
-- Per-request KV lengths are **not cumulative**. They include the current
-  chunk. Right-aligned causal masking (`sparse_mode=3`) exposes the prefix
-  plus tokens up to the current query position, never future tokens.
-- Unequal query lengths use separate calls; zero-length rows are skipped,
-  and DP token-padding output is zero. No fixed DSPARK block length is used.
-- FP16/BF16 query and cache, D=512/suffix64, up to128 local heads; page size
-  16-aligned and <=1024. Quantized KV is rejected. MoE weight quantization
-  is separate from KV-cache dtype.
-- This is ordinary eager/chunked prefill; prefill CP is explicitly rejected.
-  No new prefill graph capture support is claimed. Existing decode/verify
-  graph behavior is unchanged. Split GGUF attention keeps its original route.
-- The pre-existing prefix metadata construction is retained; the expensive
-  cached latent gather and KV expansion are bypassed, not all host metadata work.
-
-## Validation
-
-CPU regression files (normal project test environment):
+CPU regression commands in a fully installed project environment:
 
 ```bash
 PYTHONPATH=python python test/registered/unit/npu/attention/test_npu_mla_prefill.py
@@ -64,29 +58,35 @@ PYTHONPATH=python python test/registered/unit/npu/attention/test_npu_mla_prefill
 PYTHONPATH=python python test/registered/unit/npu/attention/test_npu_mla_cache.py
 ```
 
-CPU tests use an emulated FIAS call to verify NZ/ND arguments, page ordering,
-causality, lengths, empty/padded rows, storage aliasing, and original routing.
-They do **not** execute the CANN kernel. The wiring tests compile the selected
-production function bodies with AST to avoid importing the full model on CPU.
+Tests cover exact reported shapes using meta tensors, unchanged tensor identity,
+keyword mapping, integer cumulative lengths, V1/V2 routing, NZ/ND prefix content,
+ragged cold prefill, DP padding and verify/draft isolation. Wiring tests execute
+selected production AST bodies with CPU dependencies. CPU tests do not run CANN.
 
-On the actual A5/CANN/torch_npu deployment (no weights required):
+On A5 (no model weights needed):
 
 ```bash
 PYTHONPATH=python python test/manual/npu/test_k3_mla_prefill_v2.py
 ```
 
-This calls the real V2 operator with cold and 128K-cached ragged shapes, both
-ND and NZ, and compares against FP32 attention. It has not been executed in
-the CPU-only WSL environment. Hardware/library-specific support must be tested
-on the deployment; do not infer A3 support from A5 API documentation.
+This compares actual V1/V2 on cold and cached prefill, uses a small FP32 reference,
+and includes the reported 12-head, Q=6528, KV=133760 long-prefill shape.
+It requires roughly 1.1GB for long-case inputs plus workspaces and temporaries.
+These NPU tests have NOT been run in the CPU-only WSL environment.
 
-Then run single-curl, the same cached 128K/1K/BS32 replay, GSM8K/GPQA using
-the existing baseline setup, and multiple steady-state performance rounds.
-Compare output quality, accept length, TTFT, TPOT, and output throughput.
-Absorbed MLA may have different long-query costs; no speedup is promised.
-The previous A5 distributed-hang incident is not declared resolved by this work.
+Then repeat the original model request and inspect matching-layer/chunk FIAS:
+Q `[1,6528,12,192]`, K `[1,133760,12,192]`, V `[1,133760,12,128]`,
+output `[1,6528,12,128]` for that same cached request.
+No `[1,16,6528,512]` should remain on this prefill route.
+Compare precision/accept length and full attention stage time, not only FIAS.
+No claim is made that latency has returned to 18ms before A5 validation.
 
-Official API reference for A5 constraints:
-https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/aolapi/context/ops-transformer/aclnnFusedInferAttentionScoreV5.md
-Python `npu_fused_infer_attention_score_v2` and CANN `aclnn...V5` are different
-version namespaces; verify the installed op-plugin mapping, not just a kernel name.
+The previous pair of traces also had incompatible KV extents:
+V1 S=133760 versus V2 page-table capacity 1023*128=130944.
+That mismatch was not diagnosed as a truncation bug. Align the exact request,
+layer, chunk and effective KV length when comparing; do not claim a separate
+metadata defect was fixed by this P0 patch.
+
+Official API references:
+- [FIAS V2 Python signature](https://gitcode.com/Ascend/op-plugin/blob/7.3.0/docs/context/torch_npu-npu_fused_infer_attention_score_v2.md)
+- [CANN V5 prefill MLA constraints](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/aolapi/context/ops-transformer/aclnnFusedInferAttentionScoreV5.md)
