@@ -59,19 +59,13 @@ def assemble_mla_kv_from_prefix(
     k_current: torch.Tensor,
     v_current: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build contiguous FIA inputs without materializing a second prefix K."""
-    prefix_len = k_nope.shape[0]
-    current_len = k_current.shape[1]
+    """Build request-local contiguous FIA inputs with standard concatenation."""
     num_kv_heads = k_nope.shape[1]
 
-    k_full = k_current.new_empty(
-        (1, prefix_len + current_len, num_kv_heads, k_current.shape[-1])
-    )
-    torch.cat(
+    k_prefix = torch.cat(
         [k_nope, k_rope.expand(-1, num_kv_heads, -1)],
         dim=-1,
-        out=k_full[0, :prefix_len],
     )
-    k_full[:, prefix_len:] = k_current
+    k_full = torch.cat([k_prefix[None], k_current], dim=1)
     v_full = torch.cat([v_prefix[None], v_current], dim=1)
     return k_full, v_full
