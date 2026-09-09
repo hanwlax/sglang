@@ -346,6 +346,7 @@ class AscendAttnBackend(AttentionBackend):
         self.token_to_kv_pool = model_runner.token_to_kv_pool
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
         self.graph_mode = False
+        self._cached_prefix_branch_logged = False
         self.use_fa = get_bool_env_var("ASCEND_USE_FA", "False")
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
         self.use_fias_v2_bsnd = (
@@ -1624,6 +1625,20 @@ class AscendAttnBackend(AttentionBackend):
         elif sum(forward_batch.extend_prefix_lens_cpu) > 0:
             # Cached-prefix MLA extend uses FIA when qk head dim equals v head
             # dim and the head count is not a power of two.
+            if not self._cached_prefix_branch_logged:
+                if get_parallel().attn_tp_rank == 0:
+                    prefix_lens = forward_batch.extend_prefix_lens_cpu
+                    logger.info(
+                        "Entered Ascend MLA cached-prefix extend branch: "
+                        "batch_size=%d, cached_seqs=%d, cached_tokens=%d, "
+                        "new_tokens=%d",
+                        len(prefix_lens),
+                        sum(prefix_len > 0 for prefix_len in prefix_lens),
+                        sum(prefix_lens),
+                        sum(self.forward_metadata.extend_seq_lens_cpu_int),
+                    )
+                self._cached_prefix_branch_logged = True
+
             q = q.reshape(-1, layer.tp_q_head_num, layer.qk_head_dim)
 
             attn_output = torch.empty(
