@@ -1234,6 +1234,34 @@ class AscendAttnBackend(AttentionBackend):
                 sinks=sinks,
             )
 
+        if (
+            self.use_mla
+            and q_rope is not None
+            and envs.SGLANG_NPU_USE_FIAS_V2_PREFILL.get()
+        ):
+            from sglang.srt.hardware_backend.npu.attention.mla_prefill import (
+                fias_v2_mla_prefill,
+            )
+
+            # The prefill prepare path has already written through the pool
+            # (including hybrid layer translation). Read the same persistent
+            # latent cache as decode/verify, without gathering/expanding it.
+            c_kv, k_pe = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
+            attn_output = fias_v2_mla_prefill(
+                q.reshape(-1, layer.tp_q_head_num, self.kv_lora_rank),
+                q_rope.reshape(-1, layer.tp_q_head_num, self.qk_rope_head_dim),
+                c_kv,
+                k_pe,
+                query_lens=forward_batch.extend_seq_lens_cpu,
+                kv_lens=self.forward_metadata.seq_lens_cpu_int.tolist(),
+                block_table=self.forward_metadata.block_tables,
+                page_size=self.page_size,
+                scale=layer.scaling,
+                mask=self.fia_mask,
+                is_nz=is_fia_nz(),
+            )
+            return attn_output.reshape(-1, layer.tp_q_head_num * self.kv_lora_rank)
+
         if not self.use_mla:
             # Detect CP mode for prefill (context parallel)
             is_cp_mode = (

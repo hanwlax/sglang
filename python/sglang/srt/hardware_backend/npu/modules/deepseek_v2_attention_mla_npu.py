@@ -33,6 +33,8 @@ def forward_mha_prepare_npu(
     forward_batch: "ForwardBatch",
     zero_allocator: "BumpAllocator",
     layer_scatter_modes,
+    *,
+    absorb_kv: bool = False,
 ):
     if m.q_lora_rank is not None:
         q, latent_cache = (
@@ -120,6 +122,23 @@ def forward_mha_prepare_npu(
 
     q[..., m.qk_nope_head_dim :] = q_pe
 
+    if absorb_kv:
+        # Reuse prefill's exact projection/norm/cache-write path, including
+        # K3's skip-RoPE semantics. Only move the linear KV expansion across
+        # attention: Q @ W_kc attends to C, then the MLA core applies W_vc.
+        q_nope = q[..., : m.qk_nope_head_dim]
+        q_nope_out = torch.bmm(q_nope.transpose(0, 1), m.w_kc).transpose(0, 1)
+        return (
+            q_pe,
+            k_pe,
+            q_nope_out,
+            kv_a.unsqueeze(1),
+            forward_batch,
+            zero_allocator,
+            positions,
+            None,
+        )
+
     kv = m.kv_b_proj(kv_a)[0]
     kv = kv.view(-1, m.num_local_heads, m.qk_nope_head_dim + m.v_head_dim)
     k_nope = kv[..., : m.qk_nope_head_dim]
@@ -160,6 +179,22 @@ def forward_mla_prepare_npu(
     zero_allocator: "BumpAllocator",
     layer_scatter_modes,
 ):
+    if (
+        forward_batch.forward_mode.is_extend_without_speculative()
+        and envs.SGLANG_NPU_USE_FIAS_V2_PREFILL.get()
+    ):
+        # The opt-in K3 dispatcher is the only ordinary prefill caller of
+        # MLA_NPU. Cache is already written here; do not enter MLAPO or apply
+        # the fused split+norm decode path to prefill.
+        return forward_mha_prepare_npu(
+            m,
+            positions,
+            hidden_states,
+            forward_batch,
+            zero_allocator,
+            layer_scatter_modes,
+            absorb_kv=True,
+        )
     if is_mla_preprocess_enabled():
         if not hasattr(m, "mla_preprocess"):
             m.mla_preprocess = NPUFusedMLAPreprocess(

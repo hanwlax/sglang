@@ -889,6 +889,9 @@ class Envs:
     # Use FIAS V2 for DSpark MLA target verify and MHA draft paths. Graph
     # replay requires torch_npu's V2 handler to update actual_seq_kvlen.
     SGLANG_NPU_USE_FIAS_V2_BSND = EnvBool(False)
+    # Opt-in Kimi-K3 prefill over the paged latent cache (ND or PA-NZ).
+    # Independent of the DSpark verify/draft switch above and of MLAPO.
+    SGLANG_NPU_USE_FIAS_V2_PREFILL = EnvBool(False)
     # Forward native implementation for activation gelu tanh for model Skywork-Reward-Gemma-2-27B-v0.2
     SGLANG_NPU_FORWARD_NATIVE_GELUTANH = EnvBool(False)
     # Forward native implementation for gemma rms norm for model Skywork-Reward-Gemma-2-27B-v0.2
