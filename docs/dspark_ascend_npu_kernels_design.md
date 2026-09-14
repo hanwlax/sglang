@@ -1,15 +1,6 @@
----
-title: "DSpark 新增 Ascend NPU 算子设计"
-description: "基于 0729_dspark 的 hanwlax 合入及必要协作修正，描述 NPU 验证、状态提交和 KV 前缀写入算子的需求、实现与接口。"
----
-
 # DSpark 新增 Ascend NPU 算子设计
 
 ## 1 功能概述
-
-本文描述 SGLang 为 Kimi K3 DSpark 推理新增的 Ascend NPU 算子，依据指定分支的实际实现说明接口、计算语义、数据布局、并行划分和集成约束。设计围绕两项需求展开：验证阶段生成每个候选位置对应的状态快照；接受边界确定后，只提交所选状态和有效 KV 前缀。
-
-相对于比较基点，按新增可调用接口计，共有 **5 个 DSpark 主路径接口**和 **1 个同批引入的兼容回滚接口**；兼容接口在第 4.6 和 5.6 节单列，避免与 DSpark 的快照提交路径混淆。
 
 | 接口 | 职责 | 在指定分支中的位置 |
 | --- | --- | --- |
@@ -19,35 +10,6 @@ description: "基于 0729_dspark 的 hanwlax 合入及必要协作修正，描�
 | `move_intermediate_cache` | 提交 SSM 快照，适配目标状态的实际 stride | DSpark SSM 状态提交 |
 | `store_kv_cache_prefix_valid_npu_triton` | 根据设备侧长度写入有效 KV 前缀 | Target hidden 注入 draft KV 的 NPU 路径 |
 | `conv_state_rollback` | 对旧布局卷积窗口执行原地移位 | 非 DSpark 快照路径的兼容接口 |
-
-公共路径仅说明调用这些新增算子所需的适配接口。DSpark 通用候选生成、接受判定、调度、SPS/STS、CUDA 算子和普通 PyTorch fallback 不在本文范围内。已有外部 NPU 算子的调用也不计为本分支新增实现。
-
-### 1.1 代码基线与来源
-
-以 [hanwlax/sglang 的 0729_dspark](https://github.com/hanwlax/sglang/tree/f3dc7caf6168d581c0f5fcb36a37f331ac8a4872) 为代码基线，固定快照 `f3dc7caf6168d581c0f5fcb36a37f331ac8a4872`，比较基点为 `66034bff8bdf4613d02ddd270f19f5f29bd1e020`，核对日期为 2026-09-14。GitHub 分支头与本地 `mine/0729_dspark` 一致。
-
-以 hanwlax 编写或提交的 DSpark/NPU 改动为主体；为解释分支实际行为，同时列出必要的协作修正，并标明作者和提交者。`userName` 为 Git 元数据原值，不推断其真实身份。启动脚本中的机器地址和调试配置不作为产品接口。
-
-本文中的 SR 编号是本地需求追踪编号，DPR 从性能、资源、可靠性、兼容性和可验证性分析设计约束；它们不代表已分配的外部需求系统编号，也不表示相关验收已经通过。
-
-| 设计主题 | Commit | 作者 | 提交者 | 归属说明 |
-| --- | --- | --- | --- | --- |
-| Conv/KDA verify、scatter、SSM move 与兼容 rollback | [7d0eb63aca](https://github.com/hanwlax/sglang/commit/7d0eb63aca9727db9836b31513bd5253c54421c2) | hanwlax | hanwlax | hanwlax 实现 |
-| 固定 48 program 的 scatter 调整 | [a3890a3539](https://github.com/hanwlax/sglang/commit/a3890a3539d57e3c9e5fabe935e643ffdafd00a4) | zhang-chunli01 | zhang-chunli01 | 分支协作修正 |
-| 设备侧有效 KV 前缀写入及缓存池接入 | [9fd3ce3542](https://github.com/hanwlax/sglang/commit/9fd3ce3542633386451b9068412759483277ed7e) | hanwlax | hanwlax | hanwlax 实现 |
-| SSM 目标 stride、V 分块及布局用例 | [f0831b259d](https://github.com/hanwlax/sglang/commit/f0831b259dae710c178329779eacaed88efa4d57) | zhang-chunli01 | zhang-chunli01 | 分支协作修正 |
-
-## 2 SR设计
-
-| SR | 需求 | 设计约束 | 验收判据 |
-| --- | --- | --- | --- |
-| K-SR-01 | 批量完成因果卷积验证 | 固定宽度输入，逐步保存原始输入窗口，verify 不提交持久状态 | 输出及全部窗口与逐步参考一致 |
-| K-SR-02 | 批量完成 KDA 状态递推 | 支持 GQA 和两种 gate 语义，逐步保存 SSM | 输出、头映射与全部 SSM 快照符合参考 |
-| K-SR-03 | 按接受边界提交 conv/SSM | 统一使用 step=c-1，按真实目标 stride 写入 | 选中快照与持久状态一致，其他槽不变 |
-| K-SR-04 | 仅写入 draft KV 的有效前缀 | 由设备长度做 mask，固定发射 shape | c=0/1/U 及混合接受长度均不污染无效位置 |
-| K-SR-05 | 保证图重放与状态隔离 | 有效索引有界且无写冲突；遵守各算子的哨兵契约 | 多轮 replay 改变接受长度后与 eager 一致 |
-
-非 DSpark 的旧卷积窗口回滚仅保留兼容性，不增加为主路径 SR。正索引上界检查和 tracking 接入缺口分别见第 6、7 章。
 
 ## 3 实现思路
 
@@ -103,8 +65,6 @@ ssm_persistent[:, dst[r], ...]  = ssm_snapshot[:, src[r], s[r], ...]
 for j in [0, c[r]):
     draft_kv[loc[r, j]] = source_kv[r * U + j]
 ```
-
-上式是接口语义，不表示实现中存在 Python 逐请求循环。实际有效性判断在 device kernel 内完成。
 
 ## 4 实现设计
 
@@ -446,49 +406,17 @@ store_kv_cache_prefix_valid_npu_triton(
 
 ## 6 安全配置设计
 
-本设计不增加网络监听、身份认证、密钥或用户权限接口，沿用 SGLang 服务的部署边界。这里的安全配置重点是模型配置可信、请求状态隔离、设备内存访问有效和执行依赖完整。
-
-仅从可信来源加载模型、draft 配置和算子库，并固定模型与软件版本；不把开发启动脚本中的远端地址、日志路径或临时绕过检查设置作为推荐配置。模型特征、KV、概率和状态快照属于请求数据，常态日志不输出其完整内容；调试产物按既有访问权限和保留策略管理。上述是部署要求，本文引用的提交未新增对应的认证或日志脱敏实现。
-
-### 6.1 配置与失败边界
-
-`SGLANG_NPU_USE_TRITON_PREFIX_KV_CACHE_STORE` 默认 `False`，旧名 `SGLANG_NPU_USE_TRITON_KV_CACHE_STORE` 是兼容别名。开关在 NPU MHA pool 初始化时读取；开启选择本文的 Triton 前缀写入，关闭调用父类实现。该开关不控制 Conv/KDA verify 或 SSM 提交。
-
-启动前确认卷积核宽 2–6、KDA 的 K≤256、头数整除、状态容量与验证宽度匹配；按第 5 章检查 dtype、device、stride 和索引。包装器已覆盖的元数据检查与仍由调用方保证的容量上界不能混淆。失败时停止本轮状态推进，诊断并恢复到一致的已提交状态；当前算子组没有跨 conv/SSM/KV 写入的事务回滚能力。
-
-### 6.2 状态生命周期与隔离
-
-一次完整验证与提交需要满足以下顺序：
-
-1. 验证前，持久 conv/SSM 共同表示上轮已经提交的输入前缀。
-2. 验证读取该状态，写入本轮各 step 的快照；每个有效请求具有独立的可写快照槽。
-3. 接受结果确定后，以相同的 `src_slot` 和 `s=c-1` 提交 conv/SSM。
-4. 后续前向读取提交后的持久状态；相关快照在提交完成后才可复用。
-
-跨算子的顺序由调用流保证。这些 kernel 不包含跨流事件协调；若使用不同执行流，调用方需要建立验证、提交和下一轮读取之间的依赖。源快照与目标持久池应保持独立，不能默认通用 scatter、SSM move 或 KV 拷贝具有任意重叠内存下的安全搬运语义。
-
-### 6.3 索引和 padding 契约
-
-| 算子 | 负索引 / 无效长度的实际行为 | 需由调用方保证 |
-| --- | --- | --- |
-| Conv verify | 持久槽或快照槽为负，整请求屏蔽且输出为零 | 正槽位合法；有效请求快照槽不冲突 |
-| KDA verify | 负持久槽使用零初始状态；负快照槽仅跳过快照写入 | 正槽位合法；输出有效性由上层判断 |
-| 通用 scatter | 目标槽、源槽、step 任一个为负即跳过 | 正索引有界；目标槽无并发冲突 |
-| SSM move | 仅负 step 跳过 | 有效 step 对应的源槽与目标槽均合法 |
-| KV 前缀写入 | 按 `j<c` 屏蔽后缀 | `c` 在 `[0,U]`；所有有效 `loc` 合法且不冲突 |
-| 兼容 conv rollback | 负槽、负 step 或非正 shift 不搬运 | 旧布局正确；槽号有界；step 符合调用语义 |
-
-不能用一套负索引哨兵规则替代各算子的契约。当前包装层主要检查元数据，未执行设备侧索引容量检查，也不会检测重复目标槽。
+不涉及
 
 ## 7 DPR分析
 
-| 维度 | 分析 | 准入或验证要求 |
-| --- | --- | --- |
-| 性能 | verify 合并逐 token 发射；提交只拷贝所选快照；固定 grid 仍有空任务开销 | 分别测量 verify、commit、KV 写入和整模型关键路径 |
-| 资源 | 快照容量及写带宽随验证宽度线性增长 | 分配前核算峰值 NPU 内存，不能只计算持久 KV |
-| 可靠性 | 不同算子的负索引语义不同；多步提交不具备事务原子性 | 遵守第 6 章契约，检查未触及槽及跨轮状态 |
-| 兼容性 | 固定宽度线性链；SSM move 只支持连续源尾部 | ragged、树状验证或任意源 stride 不算已支持 |
-| 可验证性 | 源码内布局用例仅覆盖部分形状 | 按下列矩阵补齐；本文未执行设备测试 |
+| 维度 | 分析 |
+| --- | --- |
+| 性能 | verify 合并逐 token 发射；提交只拷贝所选快照；固定 grid 仍有空任务开销 |
+| 资源 | 快照容量及写带宽随验证宽度线性增长 |
+| 可靠性 | 不同算子的负索引语义不同；多步提交不具备事务原子性 |
+| 兼容性 | 固定宽度线性链；SSM move 只支持连续源尾部 |
+| 可验证性 | 源码内布局用例仅覆盖部分形状 |
 
 ### 7.1 快照空间与精度
 
@@ -501,25 +429,11 @@ ssm_scratch_bytes  = L * R * T * Hv * V * K * b_ssm
 
 逐步快照使任意接受位置可以通过一次选择性拷贝完成提交，但存储容量和验证写入量随 `T` 增长。状态提交每个请求只读取选中位置，不再次扫描完整验证链。
 
-KDA 递推使用 FP32，缓存精度由调用方分配的 dtype 决定；提交算子只搬运缓存值，不重新计算状态，也不消除快照落盘时产生的舍入。数值报告应区分递推误差、缓存转换误差与拷贝正确性。
+KDA 递推使用 FP32，缓存精度由调用方分配的 dtype 决定；提交算子只搬运缓存值，不重新计算状态，也不消除快照落盘时产生的舍入。
 
-### 7.2 当前集成缺口
+### 7.3 验证设计
 
-除前文固定宽度、源布局和索引约束外，指定基线存在一处需要单独验证的 tracking 接入：`update_mamba_state_after_mtp_verify()` 在处理 `mamba_track_indices` 的分支内，第二次 SSM move 仍传入工作槽 `dst_indices_tensor` 和 `last_steps`，没有使用 tracking 槽与 tracking step；同分支的 conv scatter 使用了 tracking 参数。
-
-因此，本设计能确认普通工作槽的提交调用关系，但不能把额外 tracking 槽的 conv/SSM 同步更新写成已经实现并验证的能力。这是调用参数的问题，不是两个搬运 kernel 的数学语义差异。
-
-### 7.3 验证设计与已有覆盖
-
-#### 7.3.1 指定分支已有测试
-
-`test_move_intermediate_cache()` 使用 PyTorch 索引赋值作为参考，分别验证专用 SSM move 与通用 scatter。测试入口包含两组 BF16 配置：`L=69、槽数=17、T=8、Hv=6、V=128、K=128`，分别测试连续目标和末两维转置的目标，容差为 `atol=rtol=1e-3`。
-
-这两组用例覆盖了目标 stride 处理，但不能代表所有边界已经验证：它们使用相等的 `V/K`，且所生成 step 均为非负值。本次按相关算子名称检索指定分支的 `test` 目录，未发现对应独立测试文件；当前工作区其他分支或未跟踪测试不计入该基线覆盖。
-
-本次文档编制执行的是源码与接口静态核对，没有运行 NPU kernel、图捕获或性能测试。下面列出待执行的验证方案，不作为已有测试结果。
-
-#### 7.3.2 正确性与边界验证矩阵
+#### 7.3.1 正确性与边界验证矩阵
 
 | 对象 | 参考与关键用例 | 判定内容 |
 | --- | --- | --- |
@@ -531,23 +445,3 @@ KDA 递推使用 FP32，缓存精度由调用方分配的 dtype 决定；提交�
 | 兼容 rollback | CPU 反向移位参考；`shift=0`、`0<shift<W`、`shift>=W`、负 step | 重叠区域按反向复制得到预期值；未覆盖区保持原值 |
 
 非方形转置目标测试应先分配尾部 `[K,V]` 的底层张量，再转置成逻辑 `[V,K]`，使目标逻辑 shape 与源一致；直接对 `[V,K]` 转置会交换逻辑维度，不能用来检验同 shape 的 stride 适配。
-
-#### 7.3.3 联合验证与性能验证
-
-联合验证应先生成全部 conv/SSM 快照，再分别选择 `c=1`、中间位置和 `c=T` 提交；检查两类持久状态都对应同一个输入前缀，并以提交状态继续一轮计算。KV 验证独立检查对应前缀写入，额外 tracking 模式单独覆盖第 7.2 节所述参数关系。
-
-图执行验证在固定 shape 和稳定缓冲区下改变设备侧 `commit_lens/step_indices`，比较 eager 与 capture/replay 的结果，并确认无效槽不被污染。需同时观察包装层的 `contiguous()`、dtype 转换与输出分配是否满足实际捕获环境的要求，不能只验证 device kernel。
-
-性能测试先预热并排除 JIT 编译，再按 `B/T/C/Hv/V/K`、缓存 dtype、目标布局和接受率分组记录延迟、读写字节数及 kernel 发射数量。Conv/KDA 重点观察 T 展开后的片上资源和快照带宽；scatter 观察固定 48 program 的覆盖效率；SSM move 观察请求级并行度；KV 写入观察低接受率时的空 program 开销。本文未给出未经测量的吞吐或加速比。
-
-## 8 分配需求
-
-| SR | 分配模块 / 责任域 | 交付与验收证据 | 状态 |
-| --- | --- | --- | --- |
-| K-SR-01 | NPU conv kernel；KDA backend 调用方 | 逐步输出、窗口、负槽及 graph 一致性 | 已有实现，设备验收待执行 |
-| K-SR-02 | NPU KDA kernel；gate 生成方 | FP32 参考、GQA、gate、非方形状态、全部快照 | 已有实现，边界用例待补 |
-| K-SR-03 | NPU 状态提交 kernel；Ascend hybrid backend | 源/目标槽与 c-1 对齐、转置目标、跨轮续算 | 工作槽已接入；tracking SSM 参数待修正 |
-| K-SR-04 | NPU KV kernel；MHA pool | 有效前缀写入和后缀哨兵，开关两路对照 | 已有实现，设备验收待执行 |
-| K-SR-05 | 状态池 / worker / graph 调用方；验证责任域 | 容量审计、无冲突槽分配、多轮 replay | 契约已定义，联合验证待执行 |
-
-本表按模块分配责任，不指定未经确认的人员、工期或外部需求编号。框架集成关系见 [Kimi K3 DSpark 适配设计](kimi_k3_dspark_design.md)。
