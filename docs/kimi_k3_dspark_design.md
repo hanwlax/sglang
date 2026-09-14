@@ -2,7 +2,7 @@
 
 ## 1 功能概述
 
-本文描述 SGLang 在 Ascend NPU 上运行 Kimi K3 DSpark 投机推理的适配设计，依据已有代码说明模块划分、接口约定、数据布局、执行顺序和实现约束。
+Kimi K3 DSpark 的 Ascend NPU 适配覆盖 target 特征采集、多 token 验证、状态提交，以及 attention、KV 缓存和图执行之间的协同。
 
 适配需要解决三个核心问题：
 
@@ -10,20 +10,7 @@
 2. 在 NPU 上执行 KDA 多 token 验证，为每个可能接受的位置保留卷积窗口与 SSM 状态，并按接受边界提交。
 3. 使 Ascend attention、KV 写入、图执行和采样接口满足 K3 target 与 dense draft 的不同运行要求。
 
-## 2 SR设计
-
-| SR | 需求 | 设计约束 | 验收判据 |
-| --- | --- | --- | --- |
-| D-SR-01 | 向 dense draft 提供 target 特征 | 采集训练定义对应的 pre-norm residual stream；TP gather 保持行序 | 指定 tap 与下一阶段输入的参考表示一致 |
-| D-SR-02 | NPU 执行 KDA 多 token verify | 读取已提交状态，保存每步 conv/SSM；gate 不重复激活 | 输出和全部状态符合逐步参考 |
-| D-SR-03 | 按接受长度推进状态 | 工作槽提交 c-1；tracking 应提交 crossing step | conv/SSM/KV 前缀一致，可继续下一轮 |
-| D-SR-04 | 适配 target 与 dense draft 的 attention/KV | target 宽 D，draft 宽 γ；metadata 与 FIA 长度来源一致 | 页边界、padding 和部分接受不越界 |
-| D-SR-05 | NPU graph 与 DP 本地 draft 执行 | 正确并行域、设备上下文及固定捕获宽度 | eager/graph 有效行及接受后状态一致 |
-| D-SR-06 | 提供可执行的 NPU 采样接口 | 能力检查后选择 NPU renorm 或 Torch 路径 | 归一化及边界参数符合接口语义 |
-
-这些需求限定为 K3 DSpark 的 NPU 适配，通用候选生成和接受算法沿用公共实现。D-SR-03 的额外 tracking SSM 存在分支缺口，不能按完整支持验收。
-
-## 3 实现思路
+## 2 实现思路
 
 ```mermaid
 flowchart TD
@@ -51,9 +38,9 @@ flowchart TD
 4. KDA 的 NPU verify 分支生成注意力输出及逐 token 状态快照。
 5. 公共 acceptance 返回 `commit_lens` 后，worker 将线性接受位置交给 Ascend backend，提交对应 conv/SSM 状态。
 
-### 3.1 核心数据约定
+### 2.1 核心数据约定
 
-#### 3.1.1 长度与索引
+#### 2.1.1 长度与索引
 
 | 符号 / 字段 | 定义 |
 | --- | --- |
@@ -68,7 +55,7 @@ flowchart TD
 
 例如 `γ=7、c=3` 时，提交快照下标 2，即处理完 anchor 和前两个候选后的状态。新采样的 bonus 是下一轮输入，本轮没有它的输入状态快照。
 
-#### 3.1.2 一致性要求
+#### 2.1.2 一致性要求
 
 | 对象 | 必须保持的关系 |
 | --- | --- |
@@ -80,11 +67,11 @@ flowchart TD
 | 内存访问 | 状态拷贝按实际 stride 寻址，不能用 shape 相等代替布局一致 |
 | Attention metadata | Block table 覆盖范围与 FIA 使用的序列长度来源一致 |
 
-## 4 实现设计
+## 3 实现设计
 
-### 4.1 K3 特征采集与并行处理
+### 3.1 K3 特征采集与并行处理
 
-#### 4.1.1 模型接口接入
+#### 3.1.1 模型接口接入
 
 K3 外层为 `KimiK3ForConditionalGeneration`，DSpark 使用其中的文本模型。包装层透传 `set_dspark_layers_to_capture()`、`lm_head`、`get_input_embeddings()` 与层范围属性，使公共 runner/worker 通过统一接口访问 K3。
 
@@ -94,7 +81,7 @@ K3 setter 打开 `capture_aux_hidden_states` 并保存层号列表，要求 `PP=
 
 采集接口的输出是按模型执行顺序排列的特征列表，每个 tap 对应该 token 批次的隐藏状态。当前 setter 不完整校验层号范围、重复和顺序；配置应使用有效、无重复、递增且与 draft 训练一致的层号。
 
-#### 4.1.2 Attention residual 的采集语义
+#### 3.1.2 Attention residual 的采集语义
 
 K3 层内的 `hidden_states` 不一定是下一阶段消费的完整 stream。`_dspark_capture_stream()` 负责还原第 `i` 层之后的 pre-norm residual stream。
 
@@ -107,7 +94,7 @@ K3 层内的 `hidden_states` 不一定是下一阶段消费的完整 stream。`_
 
 Residual 混合中的 norm 用于计算混合 stream；输出仍是后续阶段归一化之前的特征。不能用模型最终 RMSNorm 后的隐藏状态替代该 tap。
 
-#### 4.1.3 分片与归一化顺序
+#### 3.1.3 分片与归一化顺序
 
 K3 attention-residual 路径需要先完成 attention 输出通信，再执行自身的 residual 累加、混合和归一化。公共 `LayerCommunicator.prepare_mlp()` 因此增加 `skip_layernorm` 参数；对应 reduce-scatter 实现允许 `residual=None`，并在该参数为真时跳过自动 layernorm。K3 在该路径传入 `skip_layernorm=True`。
 
@@ -121,9 +108,9 @@ K3 attention-residual 路径需要先完成 attention 输出通信，再执行�
 
 每个 tap 使用独立输出张量保存 gather 结果，确保后续层执行不会覆盖已采集的特征。
 
-### 4.2 NPU KDA 多 token 验证
+### 3.2 NPU KDA 多 token 验证
 
-#### 4.2.1 模式分流与输入整理
+#### 3.2.1 模式分流与输入整理
 
 `KDAAttnBackend` 保存 `_dspark_target_verify = spec_algorithm.is_dspark()`。只有该标志为真且模式为 `TARGET_VERIFY`，`forward_extend()` 才进入 `_forward_dspark_target_verify()`。
 
@@ -142,7 +129,7 @@ mixed_qkv [B×D, C]
 
 要求存在 `intermediate_ssm`；缺少 speculative scratch 时直接报错。
 
-#### 4.2.2 卷积验证接口
+#### 3.2.2 卷积验证接口
 
 当前 NPU 调用为 `causal_conv1d_linear_verify_npu(..., update_persistent_state=False)`。
 
@@ -162,7 +149,7 @@ Kernel 在请求和通道块上并行，沿固定步数依次执行卷积、SiLU
 
 接口要求卷积核宽度为 `2..6`，数据张量连续，输入与状态 dtype 一致；权重可使用独立 dtype。通道块最大为 256，以控制 Ascend 片上临时存储。
 
-#### 4.2.3 SSM 验证接口与 GQA
+#### 3.2.3 SSM 验证接口与 GQA
 
 `kda_target_verify_npu()` 以持久 SSM 为只读输入，逐 token 更新临时状态，同时写出 attention output 和中间状态。
 
@@ -178,7 +165,7 @@ Wrapper 将 Q/K/V 和 gate 的只读视图转为连续布局，持久状态与�
 
 Kernel 沿请求、value head 和 V 维块并行，固定循环处理 `D` 个 token。K 维使用不超过 256 的块，V 维块最大为 64。步数来自张量形状和 `cache_steps`，不依赖读取 device scalar 来驱动逐请求 Python 循环。
 
-#### 4.2.4 Gate 预激活与下界传递
+#### 3.2.4 Gate 预激活与下界传递
 
 K3 的非 decode 路径已通过 `fused_kda_gate()` 计算 log-decay，并对 beta 执行 sigmoid。NPU wrapper 根据 `a/b` 成对前置 singleton 维，或显式 `gates_are_preactivated` 参数，选择预激活模式。该模式下 kernel 使用 `exp(a)` 与已有 beta，避免重复激活。
 
@@ -191,9 +178,9 @@ K3 的非 decode 路径已通过 `fused_kda_gate()` 计算 log-decay，并对 be
 
 NPU verify 消费已经包含下界语义的 gate，无需在 SSM kernel 中再次计算。普通 decode 与 target verify 应使用一致的模型参数和衰减定义，需要在数值验证中对齐。
 
-### 4.3 状态池与接受边界提交
+### 3.3 状态池与接受边界提交
 
-#### 4.3.1 NPU 状态布局
+#### 3.3.1 NPU 状态布局
 
 KDA 配置中的 conv shape 为 `(window,channels)`。公共 memory pool 向 `_init_npu_conv_state()` 传递 `is_kda`，NPU 实际分配为 `(channels,window)`，并保持 KDA 持久窗口长度固定；投机长度只增加快照容量。
 
@@ -214,7 +201,7 @@ L × R × D × (C × W × conv元素字节数 + H_v × V × K × SSM元素字节
 
 该式不含分配器开销。逐步快照以额外容量和写带宽换取任意接受边界的直接提交能力。
 
-#### 4.3.2 状态提交顺序
+#### 3.3.2 状态提交顺序
 
 公共 worker 在 verify 前调用 `prepare_mamba_track_for_verify()`，重建 tracking 索引并清除 extend 阶段遗留的 tracking mask。Acceptance 确定后构造线性 `chain_accept_index`，调用 `commit_mamba_states_after_verify()`，将提交位置归约为 `c-1`。
 
@@ -242,33 +229,33 @@ Ascend backend 使用当前请求的 Mamba cache 索引作为目标 slot，以�
 - Conv：当 `_dspark_target_verify` 为真时，调用 `speculative_state_scatter_npu()` 从逐步窗口直接提交，跳过旧的窗口位移 rollback。
 - Snapshot scatter：支持状态尾维 stride，负索引屏蔽相应请求；当前用固定 48 个 program 遍历逻辑任务，避免直接展开过大的 launch grid。
 
-#### 4.3.3 Prefix-cache tracking
+#### 3.3.3 Prefix-cache tracking
 
 若接受前缀跨过 tracking interval，tracking slot 应保存该边界的状态。其 step 可能早于本轮末接受 step，因此 conv 和 SSM 都必须读取 crossing step 的快照。
 
 公共 helper 已计算 `mamba_steps_to_track`，Ascend conv 分支也使用 tracking slot/step。
 
-### 4.4 Ascend Attention metadata 与 KV 写入
+### 3.4 Ascend Attention metadata 与 KV 写入
 
-#### 4.4.1 Target / draft 验证宽度
+#### 3.4.1 Target / draft 验证宽度
 
 公共图前向模式在 target 与 dense draft 间复用，但二者输入宽度不同。`AscendAttnBackend` 初始化时，对 draft worker 调用算法的宽度解析接口，得到 `γ=D-1`；target 保持 `D`。这样 mask 和 metadata 使用本 worker 的实际前向宽度。
 
-#### 4.4.2 序列长度来源
+#### 3.4.2 序列长度来源
 
-Overlap 执行中，CPU 和 device 序列长度可能对应不同推进时刻。FIA 使用 CPU 长度，因此 target verify 的 block table 覆盖范围改为：
+Overlap 执行中，CPU 和 device 序列长度可能对应不同推进时刻。FIA 使用 CPU 长度，因此 target verify 的 block table 覆盖范围按以下方式计算：
 
 ```text
 seq_lens_cpu.max() + 当前 worker 的验证宽度
 ```
 
-该调整使 block table 与 FIA 的长度来源一致，避免页边界附近因混用长度造成 KV 覆盖不足。它位于 metadata 初始化路径，不应与 kernel 内部的固定步循环混为同一执行阶段。
+Block table 在 metadata 初始化时构建，与 FIA 使用相同的长度来源，保证页边界附近的 KV 覆盖完整。Kernel 内部的固定步循环使用准备好的 metadata 执行验证。
 
-#### 4.4.3 FIA KV scatter 与有效前缀写入
+#### 3.4.3 FIA KV scatter 与有效前缀写入
 
 `NPUMHATokenToKVPool.set_kv_buffer()` 在 FIA 模式把 `[slot,1,heads,dim]` 存储视为 `[slot,heads,dim]`，再调用 `npu_scatter_nd_update_`。该视图保留底层存储，适配 CANN scatter 的维度要求；调用前检查 KV 行数与 location 数一致。
 
-`set_kv_buffer_prefix_valid()` 增加 NPU Triton 写入路径。其接口使用：
+`set_kv_buffer_prefix_valid()` 的 NPU Triton 写入路径接收以下输入：
 
 | 输入 | 约定 |
 | --- | --- |
@@ -279,7 +266,7 @@ seq_lens_cpu.max() + 当前 worker 的验证宽度
 
 Kernel 在 device 侧判断 `row_in_batch < commit_lens[batch]`，只写有效行，不先构造动态长度的有效行列表。K/V 的 head 与 head-dim 轴必须连续，源目标 dtype 和设备必须符合接口检查。该路径由 NPU pool 的配置选择，关闭时调用父类实现。
 
-### 4.5 NPU Graph 与并行域
+### 3.5 NPU Graph 与并行域
 
 Dense draft 在 DP attention 场景通过 `draft_tp_context(attn_tp_group)` 使用 attention-TP 组，按本 DP rank 的批次执行。公共 graph runner 使用 `is_dp_local_cuda_graph_capture()` 统一 capture batch 对齐和 replay batch 选择，并排除该类 draft 对跨 DP MLP gather 的依赖。
 
@@ -294,9 +281,9 @@ Dense draft 在 DP attention 场景通过 `draft_tp_context(attn_tp_group)` 使�
 - 验证 kernel 的循环长度由固定输入形状决定。
 - 图命中与 eager 回退都必须得到相同的有效输出、快照和 metadata 语义。
 
-### 4.6 NPU 采样兼容
+### 3.6 NPU 采样兼容
 
-NPU 分支中，来自其他设备实现的 `top_p_renorm_prob`、`top_k_renorm_prob` 可能为空。公共 verify 概率构造入口改为调用 wrapper，由 wrapper 选择可执行的设备路径。
+NPU 分支中，来自其他设备实现的 `top_p_renorm_prob`、`top_k_renorm_prob` 可能为空。公共 verify 概率构造入口通过 wrapper 选择可执行的设备路径。
 
 | 条件 | 调用路径 |
 | --- | --- |
@@ -306,11 +293,11 @@ NPU 分支中，来自其他设备实现的 `top_p_renorm_prob`、`top_k_renorm_
 
 NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 softmax。Top-p 参数转换为概率 tensor 的设备和 dtype；top-k 参数转换为 int32，并检查 `1..1024` 范围。
 
-对应 sampling 功能开启时，公共入口才调用这些 wrapper。分派条件不满足会进入 Torch 回退；
+启用对应 sampling 功能后，公共入口调用 wrapper；NPU 分派条件不满足时使用 Torch 回退。
 
-## 5 实现接口设计
+## 4 实现接口设计
 
-所有新增接口均位于进程内，复用既有生成服务协议。以下表格明确跨模块交接；算子的完整形状、stride 和负索引契约见 [DSpark NPU 算子设计第 5 章](dspark_ascend_npu_kernels_design.md#5-实现接口设计)。
+模型、worker、backend 和算子通过进程内接口交接数据，生成服务复用既有协议。算子的形状、stride 和负索引约束见 [DSpark NPU 算子接口](dspark_ascend_npu_kernels_design.md#4-实现接口设计)。
 
 | 接口 / 交接 | 调用方 → 实现方 | 输入与输出 | 必须满足的契约 |
 | --- | --- | --- | --- |
@@ -326,9 +313,9 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 
 状态池拥有持久状态和 scratch 存储；worker 拥有本轮请求映射和接受长度；模型负责特征及 gate 语义；backend 负责 metadata、设备分派和提交。持久状态、scratch 和 KV 的存储地址不作为外部服务协议暴露。
 
-### 5.1 模块定位
+### 4.1 模块定位
 
-所有路径均相对固定基线的仓库根目录：
+模块路径相对仓库根目录。
 
 | 责任 | 模块 |
 | --- | --- |
@@ -336,13 +323,9 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 | KDA verify 分流 | `python/sglang/srt/layers/attention/linear/kda_backend.py`、`linear/kernels/kda_triton.py`（同 attention 目录下） |
 | NPU 状态提交 | `python/sglang/srt/hardware_backend/npu/attention/ascend_hybrid_linear_attn_backend.py` |
 | NPU KV 写入 | `python/sglang/srt/hardware_backend/npu/memory_pool_npu.py` |
-| 公共接口调用方 | ModelRunner、DSpark worker、LayerCommunicator、公共 graph runner； |
+| 公共接口调用方 | ModelRunner、DSpark worker、LayerCommunicator、公共 graph runner |
 
-## 6 安全配置设计
-
-不涉及
-
-### 6.1 功能和并行配置
+### 4.2 功能和并行配置
 
 | 配置 / 条件 | 设计要求 | 当前实现边界 |
 | --- | --- | --- |
@@ -353,22 +336,26 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 | Capture layer IDs | 有效、无重复、递增并与 draft 匹配 | setter 尚无完整范围/顺序校验 |
 | NPU graph | 固定 device、宽度和并行域；图更新线程恢复 device | 无自动切换到早期 Torch verify helper 的保证 |
 
-### 6.2 请求隔离与失败处理
+### 4.3 请求状态与缓冲区生命周期
 
 不同请求必须分配不冲突的持久槽和 scratch 槽；接受结果、conv/SSM 状态和 KV 前缀必须属于同一轮输入。Verify 完成之前不读取快照，提交完成之前不复用快照；跨流调用需明确事件依赖。SSM move 只屏蔽负 step，不能把负源/目标槽与有效 step 一起传入。
 
-## 7 DPR分析
+## 5 安全配置设计
+
+不涉及。
+
+## 6 DPR分析
 
 | 维度 | 设计分析 | 验收要求 |
 | --- | --- | --- |
 | 性能 | 多 token verify 减少主机逐步调度，增加 scratch 写入；TP gather 与采样同步也有成本 | 分别测量特征采集、verify、commit、draft 和端到端时延 |
-| 资源 | 第 4.3 节公式计算中间池；容量随 L/R/D 及状态维度增长 | 核算 target/draft 权重、KV、scratch、图缓冲的总峰值 |
+| 资源 | 第 3.3 节公式计算中间池；容量随 L/R/D 及状态维度增长 | 核算 target/draft 权重、KV、scratch、图缓冲的总峰值 |
 | 可靠性 | 状态版本、gate 语义和请求行序共同决定后续生成正确性 | 逐步参考、跨轮续算、padding 和跨页验证 |
 | 兼容性 | 仅固定线性验证链；图和 DP 域需匹配；采样有同步及回退边界 | 各模式分别准入，不从单一算子测试推导整模型支持 |
 
-### 7.1 验证方案
+### 6.1 验证方案
 
-#### 7.1.1 算子与接口验证
+#### 6.1.1 算子与接口验证
 
 | 验证对象 | 检查方法与断言 |
 | --- | --- |
@@ -379,10 +366,10 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 | Verify metadata | 检查 eager/graph 初始化选择；集成测试进一步覆盖 target/draft 宽度和页边界 |
 | NPU sampling | 检查 kernel 缺失时回退；进一步对比 NPU 分派与 Torch 路径的概率、归一化和边界参数 |
 
-#### 7.1.2 模型级验证
+#### 6.1.2 模型级验证
 
 在相同 target/draft checkpoint、并行配置和请求输入下：
 
 1. 普通 decode 与 target verify 的 gate 定义、输出及接受边界状态一致，覆盖启用 `gate_lower_bound` 的配置。
 2. 单请求与多请求、不同接受长度、padding、跨页以及图命中/回退得到一致的有效状态。
-3. Prefix-cache tracking 修正后，跨 interval 的 conv/SSM 均等于该边界 reference；缓存复用后的续写结果一致。
+3. Prefix-cache tracking 的跨 interval 验证要求 conv/SSM 均等于该边界 reference，且缓存复用后的续写结果一致。

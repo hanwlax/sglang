@@ -1,8 +1,8 @@
-# DSpark 新增 Ascend NPU 算子设计
+# DSpark Ascend NPU 算子设计
 
 ## 1 功能概述
 
-| 接口 | 职责 | 在指定分支中的位置 |
+| 接口 | 职责 | 调用位置 |
 | --- | --- | --- |
 | `causal_conv1d_linear_verify_npu` | 固定宽度因果卷积，保存逐步卷积窗口 | KDA target verify |
 | `kda_target_verify_npu` | KDA 状态递推与输出，保存逐步 SSM 状态 | KDA target verify |
@@ -11,16 +11,16 @@
 | `store_kv_cache_prefix_valid_npu_triton` | 根据设备侧长度写入有效 KV 前缀 | Target hidden 注入 draft KV 的 NPU 路径 |
 | `conv_state_rollback` | 对旧布局卷积窗口执行原地移位 | 非 DSpark 快照路径的兼容接口 |
 
-## 3 实现思路
+## 2 实现思路
 
-### 3.1 维度与状态语义
+### 2.1 维度与状态语义
 
 | 符号 | 定义 |
 | --- | --- |
-| `B` | 本次调用的请求数，可包含图执行使用的 padding 请求 |
+| `B` | 单次调用的请求数，可包含图执行使用的 padding 请求 |
 | `T` | 每请求固定验证宽度；DSpark target 输入通常为 `anchor + γ 个候选`，因此 `T = γ + 1` |
 | `N = B × T` | KDA verify 的展平 token 数，顺序为 `token = request × T + step` |
-| `L` | 本次状态提交覆盖的层数；verify 算子本身按单层调用 |
+| `L` | 单次状态提交覆盖的层数；verify 算子本身按单层调用 |
 | `P / R` | 持久状态池 / 临时快照池的槽位容量，二者索引独立 |
 | `C / W` | 卷积通道数 / 历史窗口长度，卷积核宽度为 `W + 1` |
 | `Hq / Hk / Hv` | Q、K、V 头数 |
@@ -31,7 +31,7 @@
 
 快照保存的是**处理完对应输入 token 后**的状态。例如 `T = 8、c = 3`，应提交下标 2，即处理完 anchor 和前两个候选后的状态。新采样的 bonus token 作为后续输入，不在本轮状态快照中；接受接口中的长度命名不能改变这一输入状态对应关系。
 
-### 3.2 调用与数据流
+### 2.2 调用与数据流
 
 ```mermaid
 flowchart TD
@@ -66,11 +66,11 @@ for j in [0, c[r]):
     draft_kv[loc[r, j]] = source_kv[r * U + j]
 ```
 
-## 4 实现设计
+## 3 实现设计
 
-### 4.1 固定宽度因果卷积验证
+### 3.1 固定宽度因果卷积验证
 
-#### 4.1.1 计算与快照语义
+#### 3.1.1 计算与快照语义
 
 令初始历史 `h[0..W-1]` 按从旧到新排列。每个通道、每个验证步执行：
 
@@ -86,7 +86,7 @@ snapshot[slot, t, channel, :] = h
 
 `out` 以全零张量初始化。若持久槽或快照槽任一个为负，该请求整体被屏蔽：不读取历史、不写快照、不更新持久状态，输出保持零。正索引的容量上界由调用方保证。
 
-#### 4.1.2 并行划分
+#### 3.1.2 并行划分
 
 每个 program 负责一个请求的一块通道，内部通过 `tl.static_range(T)` 顺序推进所有验证步骤：
 
@@ -95,13 +95,13 @@ BLOCK_C = min(256, next_power_of_2(C))
 grid    = (B, ceil(C / BLOCK_C))
 ```
 
-这样同一通道的历史在一次 kernel 执行内连续更新，避免按 token 从主机重复发射卷积。源码注释记录了 8 步验证时，512 通道 tile 会使 Ascend 910 的 192 KiB UB 超出预算，因此实现采用最大 256 通道 tile，为编译器临时缓冲留出空间。这是当前代码的分块依据，不代表不同 NPU 或不同 `T` 下已经完成性能调优。
+同一通道的历史在一次 kernel 执行内连续更新，避免按 token 从主机重复发射卷积。通道 tile 上限设为 256，为编译器临时缓冲留出空间：在 Ascend 910 的 192 KiB UB 约束下，8 步验证使用 512 通道 tile 会超出预算。不同 NPU 和验证宽度需要分别评估片上资源占用。
 
 每层计算量为 `O(B × T × C × (W+1))`，快照写入量为 `B × T × C × W` 个元素。增加 `T` 会同时增加展开计算和快照开销。
 
-### 4.2 KDA 固定宽度验证
+### 3.2 KDA 固定宽度验证
 
-#### 4.2.1 Gate 输入契约
+#### 3.2.1 Gate 输入契约
 
 算子区分两种输入语义，避免 K3 已激活的 gate 被重复激活：
 
@@ -115,7 +115,7 @@ grid    = (B, ceil(C / BLOCK_C))
 
 当前 NPU dispatcher 没有显式传递 `gates_are_preactivated`，因此实际依赖上述形状约定。NPU 算子不接收 `lower_bound`；模型若使用带下界的 gate 变换，必须在传入已激活 gate 前完成，不能把原始 gate 模式视为包含全部模型 gate 语义。
 
-#### 4.2.2 状态递推
+#### 3.2.2 状态递推
 
 对一个请求、一个 value head，令 `S` 为 `[V,K]` 状态。每步先按以下方式归一化 Q/K：
 
@@ -141,7 +141,7 @@ FP32 状态在 program 内跨步保留，每步快照单独转换为缓存 dtype
 
 持久槽为负时以全零状态开始计算；快照槽为负时只跳过快照写入，仍计算输出。这与卷积算子“任一负槽即屏蔽整个请求”的行为不同。算子从不写回 `initial_state_source`。
 
-#### 4.2.3 并行划分与支持边界
+#### 3.2.3 并行划分与支持边界
 
 ```text
 BK   = next_power_of_2(K)                 # 要求 BK <= 256
@@ -159,9 +159,9 @@ multibuffer = False
 
 每层计算量为 `O(B × T × Hv × V × K)`，快照写入同阶。所有正槽位需要合法且在容量内；多个请求写同一个快照槽会发生竞争。
 
-### 4.3 通用状态快照提交
+### 3.3 通用状态快照提交
 
-#### 4.3.1 按 stride 寻址
+#### 3.3.1 按 stride 寻址
 
 源、目标的层、槽、step 和尾部 stride 均从实际张量读取，单位为元素。尾部不足三维时，在前面补大小为 1、stride 为 0 的维度，统一按三维坐标计算地址。
 
@@ -180,7 +180,7 @@ dst_offset = layer * dst_stride_L + dst_slot * dst_stride_P
 
 因此，源和目标可以具有不同的物理布局，只要逻辑 shape 一致且目标元素没有重叠。该接口无需先把状态转为连续副本。
 
-#### 4.3.2 固定发射规模
+#### 3.3.2 固定发射规模
 
 设 `F = product(tail)`：
 
@@ -199,9 +199,9 @@ for task in range(program_id, logical_tasks, 48):
 
 有效请求仅拷贝一个所选快照，单次读写量为 `2 × B_valid × L × F` 个元素，不随 `T` 线性增长。索引筛选与拷贝融合在同一 kernel 中，提交路径无需用 `nonzero` 或 `index_select` 先生成动态长度列表。
 
-### 4.4 SSM 专用快照拷贝
+### 3.4 SSM 专用快照拷贝
 
-#### 4.4.1 并行划分与有效性
+#### 3.4.1 并行划分与有效性
 
 ```text
 grid    = (B,)
@@ -216,9 +216,9 @@ BLOCK_K = next_power_of_2(K)
 
 当前 Ascend backend 先调用该算子提交 SSM，再在 DSpark 快照模式下调用通用 scatter 提交 conv。两次调用使用同一组工作槽、源槽和接受步号。
 
-### 4.5 KV 有效前缀写入
+### 3.5 KV 有效前缀写入
 
-#### 4.5.1 分块与图执行
+#### 3.5.1 分块与图执行
 
 ```text
 K_ROW_DIM = Hk * Dk
@@ -233,15 +233,15 @@ grid      = (B*U, ceil(max(K_ROW_DIM, V_ROW_DIM) / BLOCK), 2)
 
 有效数据的读写量为 `2 × sum(c) × (K_ROW_DIM + V_ROW_DIM)` 个元素，但发射 program 数仍由 `B*U` 决定。因此低接受率减少有效访存，不会等比例减少 program 数。算子未提供对重复有效目标槽的冲突处理，调用方必须避免并发覆盖。
 
-#### 4.5.2 NPU 缓存池接入
+#### 3.5.2 NPU 缓存池接入
 
-新增 `NPUMHATokenToKVPool.set_kv_buffer_prefix_valid()` 在启用 Triton 前缀写入时，将 paged/FIA 缓存转换为按槽排列的三维视图，并把源 K/V reshape 为固定行宽。既有 dtype、scale 和存储类型转换发生在调用 kernel 之前；kernel 本身仅做搬运。开关关闭时回到父类实现。
+`NPUMHATokenToKVPool.set_kv_buffer_prefix_valid()` 在启用 Triton 前缀写入时，将 paged/FIA 缓存转换为按槽排列的三维视图，并把源 K/V reshape 为固定行宽。既有 dtype、scale 和存储类型转换发生在调用 kernel 之前；kernel 本身仅做搬运。开关关闭时回到父类实现。
 
-在本设计涉及的 DSpark 场景中，调用入口是 draft 模型的 `write_target_hidden_kv()`：target hidden 经投影生成 K/V 后，将 `cache_loc_2d` 与 `commit_lens` 传给缓存池。本文只覆盖新增 NPU 写入接口，不展开公共 hidden 投影和接受逻辑。
+Draft 模型通过 `write_target_hidden_kv()` 注入 target 特征：先将 target hidden 投影为 K/V，再将 `cache_loc_2d` 和 `commit_lens` 传给缓存池，按接受长度写入有效前缀。
 
-### 4.6 兼容卷积窗口回滚
+### 3.6 兼容卷积窗口回滚
 
-`conv_state_rollback()` 的当前包装层实际发射 `_conv_state_rollback_kernel_v2`。旧的 `_conv_state_rollback_kernel` 仍保留，但未被该包装层使用，不另计为一个主路径算子。
+`conv_state_rollback()` 通过 `_conv_state_rollback_kernel_v2` 执行旧布局卷积窗口的原地移位。
 
 ```text
 conv_state_rollback(
@@ -262,13 +262,13 @@ for w in range(W_legacy - shift - 1, -1, -1):
 
 `state_indices`、`step_indices` 转为连续 `int32`。仅非负槽、非负 step 且 `shift>0` 的请求参与；`shift>=W_legacy` 时没有可搬运元素。发射 grid 为 `(B,L,ceil(C/BLOCK))`，`BLOCK=min(1024,next_power_of_2(C))`，内部按窗口长度静态循环。空 B 返回 `None`，非空调用返回状态张量；调用方应以原地写入效果为接口语义。
 
-Ascend backend 仅在 `use_dspark_conv_snapshots=False` 时走这一路径。DSpark KDA 已保存每一步的完整窗口，因此使用第 5.3 节的 scatter 直接提交所选快照。
+Ascend backend 仅在 `use_dspark_conv_snapshots=False` 时走这一路径。DSpark KDA 已保存每一步的完整窗口，因此使用第 4.3 节的 scatter 直接提交所选快照。
 
-## 5 实现接口设计
+## 4 实现接口设计
 
-以下是进程内 Python/Triton 接口；不新增 REST、RPC 或持久化文件格式。第 4 章说明计算和并行，第 5 章约束调用方的输入输出。
+算子通过进程内 Python/Triton 接口调用。输入输出约束包括张量形状、dtype、设备、stride、索引范围和原地写入语义。
 
-### 5.1 causal_conv1d_linear_verify_npu
+### 4.1 causal_conv1d_linear_verify_npu
 
 ```text
 causal_conv1d_linear_verify_npu(
@@ -294,7 +294,7 @@ causal_conv1d_linear_verify_npu(
 
 NPU 调用方将 `[B,T,C]` 的 dense QKV 转置并执行 `contiguous()`，使算子直接接收 `[B,C,T]`。`C` 覆盖 packed QKV 的通道，输出在调用方重新展平并拆分为 Q/K/V。
 
-### 5.2 kda_target_verify_npu
+### 4.2 kda_target_verify_npu
 
 ```text
 kda_target_verify_npu(
@@ -330,7 +330,7 @@ k_head = hv // (Hv / Hk)
 
 这使每个 value head 拥有独立 `[V,K]` 状态，同时可共享对应的 Q/K head。
 
-### 5.3 speculative_state_scatter_npu
+### 4.3 speculative_state_scatter_npu
 
 ```text
 speculative_state_scatter_npu(
@@ -345,11 +345,11 @@ dst[layer, dst_indices[r], ...] =
     src[layer, src_indices[r], step_indices[r], ...]
 ```
 
-当前 DSpark 主路径使用它提交 conv：`dst=[L,P,C,W]`、`src=[L,R,T,C,W]`。它也能表达 `[Hv,V,K]` 尾部的 SSM 拷贝，但当前 backend 的 SSM 主调用使用第 5.4 节的专用接口，不能将两者写成同时执行。
+DSpark 使用该接口提交 conv：`dst=[L,P,C,W]`、`src=[L,R,T,C,W]`。接口也支持 `[Hv,V,K]` 尾部的状态拷贝；SSM 提交实际由第 4.4 节的专用接口执行。
 
 包装接口检查层数、尾部 shape、dtype、设备以及索引维度和长度；将索引转为连续 `int32`。`B=0` 时直接返回 `dst`。正索引上界、`int32` 表示范围和目标槽唯一性由调用方保证。
 
-### 5.4 move_intermediate_cache
+### 4.4 move_intermediate_cache
 
 ```text
 move_intermediate_cache(
@@ -371,7 +371,7 @@ move_intermediate_cache(
 
 与通用 scatter 相比，该接口没有完整的 shape、dtype、设备和索引检查，仅解包源 shape 并断言三个索引长度一致。调用方必须提供逻辑维度匹配、同设备同 dtype 的状态，以及连续整型索引；不能将“目标支持转置”推广为“源和目标均支持任意布局”。
 
-### 5.5 store_kv_cache_prefix_valid_npu_triton
+### 4.5 store_kv_cache_prefix_valid_npu_triton
 
 ```text
 store_kv_cache_prefix_valid_npu_triton(
@@ -390,11 +390,11 @@ store_kv_cache_prefix_valid_npu_triton(
 
 所有张量必须同设备，四个 KV 张量 dtype 一致。K/V 的头维和头内维必须连续，行 stride 可以不同。`loc_2d` 和长度会转为连续张量，包装接口没有验证它们的整型 dtype；调用方应保证整数索引、`0 <= commit_lens[r] <= U`，以及所有有效位置的槽号合法。无效前缀之外的 `loc` 可使用哨兵值，因为对应加载被 mask 屏蔽。`B*U=0` 时直接返回。
 
-### 5.6 conv_state_rollback（兼容接口）
+### 4.6 conv_state_rollback（兼容接口）
 
-`conv_state_rollback(conv_states, state_indices, step_indices, draft_token_num)` 原地修改旧布局 `[L,P,W_legacy,C]`。空 batch 返回 `None`，非空返回状态张量；详细位移和屏蔽规则见第 4.6 节。DSpark 主路径不调用它替代快照提交。
+`conv_state_rollback(conv_states, state_indices, step_indices, draft_token_num)` 原地修改旧布局 `[L,P,W_legacy,C]`。空 batch 返回 `None`，非空返回状态张量；详细位移和屏蔽规则见第 3.6 节。DSpark 主路径不调用它替代快照提交。
 
-### 5.7 实现模块映射
+### 4.7 实现模块映射
 
 | 模块（相对仓库根目录） | 接口 |
 | --- | --- |
@@ -404,11 +404,11 @@ store_kv_cache_prefix_valid_npu_triton(
 | `python/sglang/srt/hardware_backend/npu/kernels/kv_cache_store.py` | 有效 KV 前缀写入 |
 | `python/sglang/srt/hardware_backend/npu/memory_pool_npu.py` | NPU pool 包装与格式转换 |
 
-## 6 安全配置设计
+## 5 安全配置设计
 
-不涉及
+不涉及。
 
-## 7 DPR分析
+## 6 DPR分析
 
 | 维度 | 分析 |
 | --- | --- |
@@ -416,9 +416,9 @@ store_kv_cache_prefix_valid_npu_triton(
 | 资源 | 快照容量及写带宽随验证宽度线性增长 |
 | 可靠性 | 不同算子的负索引语义不同；多步提交不具备事务原子性 |
 | 兼容性 | 固定宽度线性链；SSM move 只支持连续源尾部 |
-| 可验证性 | 源码内布局用例仅覆盖部分形状 |
+| 可验证性 | 通过逐步数值参考、非连续布局和边界索引验证计算及搬运语义 |
 
-### 7.1 快照空间与精度
+### 6.1 快照空间与精度
 
 同构层配置下，设 conv 和 SSM 缓存每元素字节数分别为 `b_conv`、`b_ssm`，快照池容量为：
 
@@ -431,14 +431,14 @@ ssm_scratch_bytes  = L * R * T * Hv * V * K * b_ssm
 
 KDA 递推使用 FP32，缓存精度由调用方分配的 dtype 决定；提交算子只搬运缓存值，不重新计算状态，也不消除快照落盘时产生的舍入。
 
-### 7.3 验证设计
+### 6.2 验证设计
 
-#### 7.3.1 正确性与边界验证矩阵
+#### 6.2.1 正确性与边界验证矩阵
 
 | 对象 | 参考与关键用例 | 判定内容 |
 | --- | --- | --- |
 | Conv verify | FP32 逐步卷积参考；核宽 2–6；有/无 bias；三种激活参数；通道跨 tile 边界 | 每步输出与原始输入窗口快照正确；默认持久状态不变；负槽请求输出为零 |
-| KDA verify | 按第 4.2 节公式保留 FP32 状态的参考；原始/已激活 gate；不同 `Hq/Hk/Hv`；V 跨 64、K 非二次幂且不超过 256 | 输出、逐步快照、头映射及 scale 正确；持久状态只读；两种负槽语义分别符合契约 |
+| KDA verify | 按第 3.2 节公式保留 FP32 状态的参考；原始/已激活 gate；不同 `Hq/Hk/Hv`；V 跨 64、K 非二次幂且不超过 256 | 输出、逐步快照、头映射及 scale 正确；持久状态只读；两种负槽语义分别符合契约 |
 | 通用 scatter | 索引赋值参考；尾部 1–3 维；非连续源/目标；不按请求号排列的源槽；三种负索引；空 B | 选中位置相等，其他位置保持哨兵值；有限同 dtype 数据可按零容差验证 |
 | SSM move | 连续源 + 连续/转置目标；非方形 `[V,K]`；不同 V 分块；负 step | 正确使用目标 stride；全部层/头拷贝完整；负 step 不改目标 |
 | KV 前缀写入 | `c=0/1/U` 混合；不同 K/V 行宽；非紧凑行 stride；无效后缀位置放哨兵；空源行 | 只更新有效前缀，所有其他槽不变；有效数据零容差一致 |
