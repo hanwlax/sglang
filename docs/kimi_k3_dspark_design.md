@@ -10,37 +10,6 @@
 2. 在 NPU 上执行 KDA 多 token 验证，为每个可能接受的位置保留卷积窗口与 SSM 状态，并按接受边界提交。
 3. 使 Ascend attention、KV 写入、图执行和采样接口满足 K3 target 与 dense draft 的不同运行要求。
 
-公共模块只描述因本适配增加或修改的接口与行为。DSpark 通用 proposal、Markov/confidence head、acceptance 算法、SPS/STS、完整调度流程，以及 K3 视觉编码、聊天模板、一般量化和常规 MoE 实现不在本文范围内。
-
-下文“设计要求”表示接口应满足的语义，“当前实现”表示该基线中的调用行为。尚未满足或未经运行验证的部分集中列在第 7.2 节。
-
-### 1.1 代码基线与来源
-
-以 [hanwlax/sglang 的 0729_dspark](https://github.com/hanwlax/sglang/tree/f3dc7caf6168d581c0f5fcb36a37f331ac8a4872) 为代码基线，固定快照 `f3dc7caf6168d581c0f5fcb36a37f331ac8a4872`，比较基点为 `66034bff8bdf4613d02ddd270f19f5f29bd1e020`，核对日期为 2026-09-14。GitHub 分支头与本地 `mine/0729_dspark` 一致。
-
-以 hanwlax 编写或提交的 DSpark/NPU 改动为主体；为解释分支实际行为，同时列出必要的协作修正，并标明作者和提交者。`userName` 为 Git 元数据原值，不推断其真实身份。启动脚本中的机器地址和调试配置不作为产品接口。
-
-本文中的 SR 编号是本地需求追踪编号，DPR 从性能、资源、可靠性、兼容性和可验证性分析设计约束；它们不代表已分配的外部需求系统编号，也不表示相关验收已经通过。
-
-| 设计主题 | Commit | 作者 | 提交者 | 归属说明 |
-| --- | --- | --- | --- | --- |
-| K3 DSpark 基础入口 | [8b1b235ab4](https://github.com/hanwlax/sglang/commit/8b1b235ab43f96fec4d8eb3f1fafd889472e3861) | hanwlax | hanwlax | hanwlax 实现 |
-| Conv 快照提交与图接入 | [6c515b0eea](https://github.com/hanwlax/sglang/commit/6c515b0eea73109776026f3fedebf8fa33c6901c) | hanwlax | hanwlax | hanwlax 实现 |
-| Draft graph replay 早期接入 | [0973304dd9](https://github.com/hanwlax/sglang/commit/0973304dd9e729c6a75843c01edfbc7e84120474) | hanwlax | hanwlax | hanwlax 实现 |
-| NPU 验证和状态提交算子 | [7d0eb63aca](https://github.com/hanwlax/sglang/commit/7d0eb63aca9727db9836b31513bd5253c54421c2) | hanwlax | hanwlax | hanwlax 实现 |
-| Attention residual 特征采集 | [b00a37531c](https://github.com/hanwlax/sglang/commit/b00a37531c83ca21730763c933a2663bf363c245) | hanwlax | hanwlax | hanwlax 实现 |
-| Hidden/residual gather | [73eb0888db](https://github.com/hanwlax/sglang/commit/73eb0888db431744a270bd480e79a30c970c23cc) | hanwlax | hanwlax | hanwlax 实现 |
-| 通信与归一化顺序 | [e412661373](https://github.com/hanwlax/sglang/commit/e412661373334d318399e7a8595a31fabe841ab2) | tian-shengzhao | hanwlax | 协作实现，hanwlax 提交 |
-| 共享专家通信与图更新设备上下文 | [8ebf0dc34d](https://github.com/hanwlax/sglang/commit/8ebf0dc34d668f0cc8ed26796e07cfce7072e34c) | hanwlax | hanwlax | hanwlax 实现 |
-| 有效 KV 前缀写入 | [9fd3ce3542](https://github.com/hanwlax/sglang/commit/9fd3ce3542633386451b9068412759483277ed7e) | hanwlax | hanwlax | hanwlax 实现 |
-| scatter 发射规模 | [a3890a3539](https://github.com/hanwlax/sglang/commit/a3890a3539d57e3c9e5fabe935e643ffdafd00a4) | zhang-chunli01 | zhang-chunli01 | 分支协作修正 |
-| SSM 目标 stride 与布局测试 | [f0831b259d](https://github.com/hanwlax/sglang/commit/f0831b259dae710c178329779eacaed88efa4d57) | zhang-chunli01 | zhang-chunli01 | 分支协作修正 |
-| 非 DSpark 前向分流 | [0809d9b972](https://github.com/hanwlax/sglang/commit/0809d9b972714d9b7d5dfd4f8312cb346767b68b) | zhang-chunli01 | zhang-chunli01 | 分支协作修正 |
-| Dense draft DP 本地图执行 | [2a2f2dd150](https://github.com/hanwlax/sglang/commit/2a2f2dd150e39454a3d9be7d244fbe25219bc88f) | userName | userName | 分支集成依赖，作者为占位名 |
-| NPU top-k/top-p 接口兼容 | [3675e2a708](https://github.com/hanwlax/sglang/commit/3675e2a7086f26dea1601b99d388655ccc893fda) | userName | userName | 分支集成依赖，作者为占位名 |
-| K3 TP 布局修正 | [bb9a3f24bd](https://github.com/hanwlax/sglang/commit/bb9a3f24bd79895d8c0db0458b698a93e4dc38fc) | userName | userName | 分支集成依赖，作者为占位名 |
-| Gate 下界传递 | [f3dc7caf61](https://github.com/hanwlax/sglang/commit/f3dc7caf6168d581c0f5fcb36a37f331ac8a4872) | userName | hanwlax | 作者为占位名，hanwlax 提交 |
-
 ## 2 SR设计
 
 | SR | 需求 | 设计约束 | 验收判据 |
@@ -171,9 +140,7 @@ mixed_qkv [B×D, C]
   → Q/K/V [1, B×D, heads, head_dim]
 ```
 
-该分支要求存在 `intermediate_ssm`；缺少 speculative scratch 时直接报错。
-
-公共入口还包含依据 `query_start_loc` 将 token scatter 到固定卷积窗口、再 gather 回原行顺序的代码，并使用额外无效行承接 padding。这只处理卷积输入布局。NPU SSM kernel 本身仍按 `batch_id × cache_steps + step` 划分请求，任意不等宽输入的限制见第 7.2 节。
+要求存在 `intermediate_ssm`；缺少 speculative scratch 时直接报错。
 
 #### 4.2.2 卷积验证接口
 
@@ -279,7 +246,7 @@ Ascend backend 使用当前请求的 Mamba cache 索引作为目标 slot，以�
 
 若接受前缀跨过 tracking interval，tracking slot 应保存该边界的状态。其 step 可能早于本轮末接受 step，因此 conv 和 SSM 都必须读取 crossing step 的快照。
 
-公共 helper 已计算 `mamba_steps_to_track`，Ascend conv 分支也使用 tracking slot/step。当前 SSM tracking 调用仍使用工作 slot 和末接受 step，尚未符合上述要求；具体缺口见第 7.2 节。
+公共 helper 已计算 `mamba_steps_to_track`，Ascend conv 分支也使用 tracking slot/step。
 
 ### 4.4 Ascend Attention metadata 与 KV 写入
 
@@ -312,8 +279,6 @@ seq_lens_cpu.max() + 当前 worker 的验证宽度
 
 Kernel 在 device 侧判断 `row_in_batch < commit_lens[batch]`，只写有效行，不先构造动态长度的有效行列表。K/V 的 head 与 head-dim 轴必须连续，源目标 dtype 和设备必须符合接口检查。该路径由 NPU pool 的配置选择，关闭时调用父类实现。
 
-本节只描述设备写入适配；hidden 到 draft KV 的公共投影与注入算法不展开。
-
 ### 4.5 NPU Graph 与并行域
 
 Dense draft 在 DP attention 场景通过 `draft_tp_context(attn_tp_group)` 使用 attention-TP 组，按本 DP rank 的批次执行。公共 graph runner 使用 `is_dp_local_cuda_graph_capture()` 统一 capture batch 对齐和 replay batch 选择，并排除该类 draft 对跨 DP MLP gather 的依赖。
@@ -329,8 +294,6 @@ Dense draft 在 DP attention 场景通过 `draft_tp_context(attn_tp_group)` 使�
 - 验证 kernel 的循环长度由固定输入形状决定。
 - 图命中与 eager 回退都必须得到相同的有效输出、快照和 metadata 语义。
 
-源码中的早期 Torch verify helper 未被当前 NPU 主入口选用；不能将其行为当作图路径失败后的自动回退策略。
-
 ### 4.6 NPU 采样兼容
 
 NPU 分支中，来自其他设备实现的 `top_p_renorm_prob`、`top_k_renorm_prob` 可能为空。公共 verify 概率构造入口改为调用 wrapper，由 wrapper 选择可执行的设备路径。
@@ -343,9 +306,7 @@ NPU 分支中，来自其他设备实现的 `top_p_renorm_prob`、`top_k_renorm_
 
 NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 softmax。Top-p 参数转换为概率 tensor 的设备和 dtype；top-k 参数转换为 int32，并检查 `1..1024` 范围。
 
-对应 sampling 功能开启时，公共入口才调用这些 wrapper。分派条件不满足会进入 Torch 回退；当前实现不把 NPU 算子运行时异常作为自动回退条件。Top-k 路径仍包含 `.item()`，因此这里不能按完全无主机同步的图内路径处理。
-
-本节仅说明新增的设备分派、输入转换和回退接口，不描述通用采样与 acceptance 算法。
+对应 sampling 功能开启时，公共入口才调用这些 wrapper。分派条件不满足会进入 Torch 回退；
 
 ## 5 实现接口设计
 
@@ -375,13 +336,11 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 | KDA verify 分流 | `python/sglang/srt/layers/attention/linear/kda_backend.py`、`linear/kernels/kda_triton.py`（同 attention 目录下） |
 | NPU 状态提交 | `python/sglang/srt/hardware_backend/npu/attention/ascend_hybrid_linear_attn_backend.py` |
 | NPU KV 写入 | `python/sglang/srt/hardware_backend/npu/memory_pool_npu.py` |
-| 公共接口调用方 | ModelRunner、DSpark worker、LayerCommunicator、公共 graph runner；仅本文所述适配行为属于本设计 |
+| 公共接口调用方 | ModelRunner、DSpark worker、LayerCommunicator、公共 graph runner； |
 
 ## 6 安全配置设计
 
-本设计不增加网络监听、身份认证、密钥或用户权限接口，沿用 SGLang 服务的部署边界。这里的安全配置重点是模型配置可信、请求状态隔离、设备内存访问有效和执行依赖完整。
-
-仅从可信来源加载模型、draft 配置和算子库，并固定模型与软件版本；不把开发启动脚本中的远端地址、日志路径或临时绕过检查设置作为推荐配置。模型特征、KV、概率和状态快照属于请求数据，常态日志不输出其完整内容；调试产物按既有访问权限和保留策略管理。上述是部署要求，本文引用的提交未新增对应的认证或日志脱敏实现。
+不涉及
 
 ### 6.1 功能和并行配置
 
@@ -398,8 +357,6 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 
 不同请求必须分配不冲突的持久槽和 scratch 槽；接受结果、conv/SSM 状态和 KV 前缀必须属于同一轮输入。Verify 完成之前不读取快照，提交完成之前不复用快照；跨流调用需明确事件依赖。SSM move 只屏蔽负 step，不能把负源/目标槽与有效 step 一起传入。
 
-异常发生后不得将部分写回状态继续当作完整已提交版本。恢复应从一致状态重新建立请求上下文；本分支未提供跨状态池的事务恢复。额外 prefix-cache tracking 在第 7.2 节问题修正及回归通过前，不声明其 SSM 与 conv 一致性已得到保证。
-
 ## 7 DPR分析
 
 | 维度 | 设计分析 | 验收要求 |
@@ -408,56 +365,24 @@ NPU wrapper 将概率取 log 后交给 `npu_top_k_top_p`，并对输出执行 so
 | 资源 | 第 4.3 节公式计算中间池；容量随 L/R/D 及状态维度增长 | 核算 target/draft 权重、KV、scratch、图缓冲的总峰值 |
 | 可靠性 | 状态版本、gate 语义和请求行序共同决定后续生成正确性 | 逐步参考、跨轮续算、padding 和跨页验证 |
 | 兼容性 | 仅固定线性验证链；图和 DP 域需匹配；采样有同步及回退边界 | 各模式分别准入，不从单一算子测试推导整模型支持 |
-| 可维护性 | 模型 / worker / backend / kernel 分工，五个主路径算子单独定义契约 | 保留来源 commit，协作修正与待办可追溯 |
 
 ### 7.1 验证方案
 
 #### 7.1.1 算子与接口验证
 
-| 验证对象 | 检查方法与断言 | 已有用例情况 |
-| --- | --- | --- |
-| K3 tap | 与下一阶段消费的 pre-norm stream 对比；覆盖末层、attention residual 和 TP gather 的行顺序 | 需补充模型级测试 |
-| NPU conv verify | 对比逐 token reference 的输出和每步窗口；verify 前后持久状态不变；覆盖 `D>W`、非整块通道与混合权重 dtype | 不计入本基线覆盖，需补充独立验证 |
-| NPU SSM verify | 对比 attention 输出和全部 step snapshot；检查持久状态不变、GQA、预激活 gate、`K≠V` 及 stride | 不计入本基线覆盖，需补充独立验证 |
-| Snapshot 提交 | 对 `c=1`、中途拒绝、`c=D` 检查目标状态等于 `scratch[c-1]`，其他 slot 不变 | 分支内 SSM move 用例；scatter 独立用例待补 |
-| Verify metadata | 检查 eager/graph 初始化选择；集成测试进一步覆盖 target/draft 宽度和页边界 | 需补充独立 metadata 用例 |
-| NPU sampling | 检查 kernel 缺失时回退；进一步对比 NPU 分派与 Torch 路径的概率、归一化和边界参数 | `test/registered/unit/speculative/test_dflash_utils.py` |
-
-独立 conv/KDA、scatter 和 metadata 的工作区补充用例不属于指定分支提交，不能作为本基线已交付覆盖。分支内 SSM move 用例覆盖目标转置布局；其余场景按上表补齐。
+| 验证对象 | 检查方法与断言 |
+| --- | --- |
+| K3 tap | 与下一阶段消费的 pre-norm stream 对比；覆盖末层、attention residual 和 TP gather 的行顺序 |
+| NPU conv verify | 对比逐 token reference 的输出和每步窗口；verify 前后持久状态不变；覆盖 `D>W`、非整块通道与混合权重 dtype |
+| NPU SSM verify | 对比 attention 输出和全部 step snapshot；检查持久状态不变、GQA、预激活 gate、`K≠V` 及 stride |
+| Snapshot 提交 | 对 `c=1`、中途拒绝、`c=D` 检查目标状态等于 `scratch[c-1]`，其他 slot 不变 |
+| Verify metadata | 检查 eager/graph 初始化选择；集成测试进一步覆盖 target/draft 宽度和页边界 |
+| NPU sampling | 检查 kernel 缺失时回退；进一步对比 NPU 分派与 Torch 路径的概率、归一化和边界参数 |
 
 #### 7.1.2 模型级验证
 
-在相同 target/draft checkpoint、并行配置和请求输入下，检查：
+在相同 target/draft checkpoint、并行配置和请求输入下：
 
 1. 普通 decode 与 target verify 的 gate 定义、输出及接受边界状态一致，覆盖启用 `gate_lower_bound` 的配置。
 2. 单请求与多请求、不同接受长度、padding、跨页以及图命中/回退得到一致的有效状态。
 3. Prefix-cache tracking 修正后，跨 interval 的 conv/SSM 均等于该边界 reference；缓存复用后的续写结果一致。
-4. 性能比较固定权重、输入输出长度、并发度、采样参数和并行配置，分别测量 verify、状态提交及端到端时延；不以算子用例代替整模型性能结论。
-
-Conv/KDA 验证、状态 scatter 和 verify metadata 的独立用例属于工作区补充测试，未包含在分支提交中；SSM move 用例与 sampling 单测已随源码提交。本文记录用例和验证要求，不声明这些测试已在当前基线执行通过。
-
-### 7.2 约束与当前实现缺口
-
-| 项目 | 当前行为及限制 |
-| --- | --- |
-| NPU 固定宽度 | KDA kernel 仅以 `cache_steps` 切分请求，不接收逐请求 offset。不等宽输入即使总行数可整除，也不能证明请求分界正确；需要独立的 ragged 转换或 kernel 支持。 |
-| Prefix-cache SSM tracking | Ascend tracking 分支内第二次 `move_intermediate_cache()` 仍传入 `dst_indices_tensor/last_steps`，没有传入 `mamba_track_indices/mamba_steps_to_track`，未实现预期 tracking SSM 写入。 |
-| Capture 配置 | Layer IDs 的范围、重复与顺序未在 K3 setter 中完整校验；实际采集顺序为模型执行顺序。 |
-| 并行配置 | K3 capture 要求 `PP=1`；DSpark DP attention 要求启用 DP lm head，且该组合不支持 `attn_cp_size>1`。 |
-| Kernel 形状 | NPU conv 核宽为 `2..6`；KDA 的 K 维不超过 256，并要求 value head 数分别被 Q/K head 数整除。 |
-| Sampling 回退 | 能力检查与 Torch 回退中存在主机同步点，需独立评估 graph 适用性。 |
-
-这些结论来自源码检查。本次只修改设计文档，没有修复上述实现缺口或执行 NPU 复现。
-
-## 8 分配需求
-
-| SR | 分配模块 / 责任域 | 交付与验收证据 | 状态 |
-| --- | --- | --- | --- |
-| D-SR-01 | K3 模型；ModelRunner；LayerCommunicator | tap 配置、residual 语义、TP 行序对照 | 已接入；完整 tap 校验与模型回归待补 |
-| D-SR-02 | KDA backend / dispatcher；NPU 算子 | K-SR-01/02 的接口与数值验证 | 已接入；固定宽度限制保留 |
-| D-SR-03 | DSpark worker；Ascend hybrid backend；状态池 | K-SR-03 工作提交与 crossing tracking 联合验证 | 工作提交已实现；tracking SSM 待修正 |
-| D-SR-04 | Ascend attention backend；NPU KV pool | K-SR-04 有效前缀、target/draft 宽度与页边界 | 已接入；设备联合验证待执行 |
-| D-SR-05 | draft worker；公共/NPU graph runner | K-SR-05 多轮 graph、DP 本地 batch、设备线程上下文 | 已接入；eager/graph 验收待执行 |
-| D-SR-06 | 采样 wrapper；验证责任域 | NPU 能力分派、Torch 回退与概率边界 | 已有实现与部分单测；不承诺完全无主机同步 |
-
-本表为模块责任分配。人员、工期、业务精度阈值和正式需求编号由项目管理确定；本文不将待执行验证写为已通过结果。950DT 后续优化见 [性能优化设计](kimi_k3_950dt_performance_design.md)。
