@@ -1,15 +1,6 @@
----
-title: "Kimi K3 在 Ascend 950DT 上的性能优化设计"
-description: "依据 a5-k3-0828 中 hanwlax 的框架与算子合入，描述投影、KDA 验证、双流、FIAS V2、MXFP8、NZ 缓存和性能观测设计。"
----
-
 # Kimi K3 在 Ascend 950DT 上的性能优化设计
 
 ## 1 功能概述
-
-本文面向 Ascend 950DT 的 Kimi K3 推理，目标是缩短 attention、MoE 和 DSpark 验证关键路径，减少重复投影、输入连续化、量化及中间数据搬运，并提供评估专家负载和尾时延所需的观测能力。
-
-设计覆盖两个指定仓库中 hanwlax 编写、提交或执行合并的相关改动。共享专家 TP 子组和 EPLB 是他人实现、由 hanwlax 合入的协作项，单独标注；共享专家细粒度重叠、图更新 worker 等其他集成仅说明与本设计的边界。不能把分支的全部变更归为 hanwlax 独立实现。
 
 | 优化位置 | 功能 | 设计目的 |
 | --- | --- | --- |
@@ -21,52 +12,9 @@ description: "依据 a5-k3-0828 中 hanwlax 的框架与算子合入，描述投
 | MLA cache | 非 MLAPO 路径写 NZ，prefix 读取恢复逻辑页 | 保持 NZ attention 与缓存复用语义一致 |
 | 负载与观测 | K3 专家 placement、DeepEP AUTO 统计、rank 过滤 trace | 支持分析不均衡和性能回归，不直接宣称吞吐提升 |
 
-W4A8 路径使用 packed MXFP4 权重和 MXFP8 激活。本文中的 SiTU 融合优化运行时激活量化，保留权重格式和 GMM 数值接口；不重新定义离线量化算法。本文不填入未测量的 950DT 加速比。
+W4A8 路径使用 packed MXFP4 权重和 MXFP8 激活。
 
-### 1.1 基线与归属口径
-
-`zzx` 为 Git remote 名称，对应 GitHub 所有者 `zhaozx-cn`。两仓库均以 `a5-k3-0828` 为分支，已通过 GitHub 核对分支头：
-
-| 仓库 | 固定快照 |
-| --- | --- |
-| [zhaozx-cn/sglang](https://github.com/zhaozx-cn/sglang/tree/63aa7f7ca193eb628359b651f00553853ce77f65) | `63aa7f7ca193eb628359b651f00553853ce77f65` |
-| [zhaozx-cn/sgl-kernel-npu](https://github.com/zhaozx-cn/sgl-kernel-npu/tree/c8c10f7cff20b8d11d403b4e4e37aa3114ba909e) | `c8c10f7cff20b8d11d403b4e4e37aa3114ba909e` |
-
-核对日期：2026-09-14。下表区分作者、提交者与合并操作者；merge commit 的作者信息表示执行合并，不等于 PR 内全部代码的作者。设计以主题引入提交和固定快照的最终接入共同说明。SR 编号仅用于本文追踪；DPR 分析性能、资源、可靠性、兼容性和可观测性，不代替实际验收报告。
-
-### 1.2 框架与算子来源
-
-| 设计主题 | Commit | 作者 | 提交者 | 归属说明 |
-| --- | --- | --- | --- | --- |
-| 共享专家基础双流 | [f3ca9cb559](https://github.com/zhaozx-cn/sglang/commit/f3ca9cb559d3dd34ff7ff41d2ad4147fbff4f6db) | hanwlax | hanwlax | hanwlax 实现；经 #1 进入目标分支 |
-| Full-rank QKVG 与 ModelSlim 映射 | [6d48f564a6](https://github.com/zhaozx-cn/sglang/commit/6d48f564a6cfed76c294cac8f97153ab87e01afc) | hanwlax | hanwlax | hanwlax 实现；经 #1 合入 |
-| QKVG 权重加载条件修正 | [6ffc661d88](https://github.com/zhaozx-cn/sglang/commit/6ffc661d88f74558ceaf2f6a016a76bd09ae29aa) | hanwlax | GitHub | hanwlax 实现，#4 |
-| FIAS V2 与图内长度更新 | [8491b10adf](https://github.com/zhaozx-cn/sglang/commit/8491b10adf34d76d4bedf94530750e816945d53a) | hanwlax | GitHub | hanwlax 实现，#6 |
-| DeepEP MXFP8 分派 | [f5d724b641](https://github.com/zhaozx-cn/sglang/commit/f5d724b641de052d403f4538a33cdaab16b23c3c) | hanwlax | GitHub | hanwlax 实现，#11 |
-| SiTU＋MXFP8 框架接入 | [ff2f4caf69](https://github.com/zhaozx-cn/sglang/commit/ff2f4caf6904fae4072dcab9f1879a8c53b1125b) | hanwlax | GitHub | hanwlax 实现，#13 |
-| NPU chain rejection sampling | [c4ab122939](https://github.com/zhaozx-cn/sglang/commit/c4ab122939adcdec78bb64ea31593c61c47a39ae) | hanwlax | hanwlax | hanwlax 实现；经 #19 合入 |
-| NZ 写入与逻辑 prefix 读取 | [6f3acbf4c0](https://github.com/zhaozx-cn/sglang/commit/6f3acbf4c0d74b85a19dc4747f41a7695dc91906) | hanwlax | GitHub | hanwlax 合并 #34；含其 prefix 读取修正 |
-| 共享专家 TP 子组 | [13e5168c68](https://github.com/zhaozx-cn/sglang/commit/13e5168c684858c3849709c2bf75c5e42564311b) | hanwlax | GitHub | Hexq0210 实现，hanwlax 合并 #35 |
-| 专家 placement、AUTO 统计与 trace | [63aa7f7ca1](https://github.com/zhaozx-cn/sglang/commit/63aa7f7ca193eb628359b651f00553853ce77f65) | hanwlax | GitHub | qybnb 实现，hanwlax 合并 #39 |
-
-| 设计主题 | Commit | 作者 | 提交者 | 归属说明 |
-| --- | --- | --- | --- | --- |
-| KDA verify 显式 stride，省去五个输入副本 | [34c6ad799d](https://github.com/zhaozx-cn/sgl-kernel-npu/commit/34c6ad799d1806c59b7e48798148e43cf0fe7055) | hanwlax | hanwlax | hanwlax 实现；由 zzx 合并 #1 |
-| A5 SiTU＋MXFP8 AscendC、注册、构建及测试 | [bc34b34725](https://github.com/zhaozx-cn/sgl-kernel-npu/commit/bc34b347259e062ed43a9edc7abf656444d93339) | hanwlax | GitHub | hanwlax 实现，#5 |
-
-## 2 SR设计
-
-| SR | 需求 | 设计约束 | 验收判据 |
-| --- | --- | --- | --- |
-| P-SR-01 | 减少 KDA 投影和 verify 数据整理 | 融合宽投影，按真实 stride 读取 Q/K/V/a/b | 权重分片及结果正确；连续化调用与耗时减少 |
-| P-SR-02 | 优化共享专家关键路径 | 主/备用流依赖明确；共享 TP 大小合法 | 共享/routed 结果一致；记录真实重叠及等待 |
-| P-SR-03 | 接入 FIAS V2 并正确重放图 | 区分 BNSD/TND 和捕获模式；更新长度后 replay | 页边界、padding、IDLE rank 的输出正确 |
-| P-SR-04 | 打通 MoE 的 MXFP8 激活链路 | normal BF16 / low-latency MXFP8；payload/scale/counts 联合传递 | GMM1/GMM2 不重复量化，端到端精度满足要求 |
-| P-SR-05 | 匹配 NPU DSpark acceptance 接口 | NPU 采样实现与随机数行宽一致 | 接受索引、bonus 和边界访问符合接口 |
-| P-SR-06 | 保证 NZ 缓存写入和复用正确 | 逻辑页和物理 tile 顺序互相映射 | 新写、prefix hit、跨页及 eager/graph 一致 |
-| P-SR-07 | 提供可信的负载与性能观测 | 逻辑/物理专家映射、AUTO 分派统计及 rank 过滤一致 | 统计不重复不遗漏，trace 可关联配置 |
-
-## 3 实现思路
+## 2 实现思路
 
 Kimi K3 的单层执行中，attention 与 MoE 是不同的计算阶段；MoE 内部又包含共享专家和 routed experts 两条可并行的分支。投影与 verify 优化之外，三项主要优化分别作用于不同位置。
 
@@ -102,7 +50,7 @@ Full-rank K3 将对齐友好的 Q/K/V/G 宽投影合并为 `fused_qkvg_proj`；�
 
 `6d48f564a6` 为 `KimiK3LinearForCausalLM` 添加 packed module 映射，将融合模块关联到 checkpoint 的 q/k/v/g 模块名，使 ModelSlim 能解析对应方案；`6ffc661d88` 修正 weight loader，对 full-rank 融合模块按 `use_full_rank_gate` 判断，避免仅检查旧融合标志而跳过权重。需要在加载后核对各投影分片内容，不能仅检查模型能够构造。
 
-外部算子提交 `34c6ad7` 使 `kda_target_verify_npu` 显式接收 Q/K/V/a/b 的 token、head 和 dim stride，取消这五个输入的 `.contiguous()`；A_log、dt_bias 和索引仍进行各自连续化。返回值显式分配为连续 `[1,N,Hv,V]`，避免继承非连续 V 的输出布局。该改动不取消 conv 输入整理，也不意味着整层没有复制。
+`kda_target_verify_npu` 显式接收 Q/K/V/a/b 的 token、head 和 dim stride，取消这五个输入的 `.contiguous()`；A_log、dt_bias 和索引仍进行各自连续化。返回值显式分配为连续 `[1,N,Hv,V]`，避免继承非连续 V 的输出布局。该改动不取消 conv 输入整理，也不意味着整层没有复制。
 
 固定快照中的 `AscendKDAAttnBackend` 从 `sgl_kernel_npu.fla.kda_target_verify` 导入该接口。调用方先用 `fused_kda_gate_npu(..., lower_bound=layer.lower_bound)` 生成 log-decay，并对 beta 执行 FP32 sigmoid，再明确设置 `gates_are_preactivated=True`。外部接口已经移除 `lower_bound` 参数，原始 gate 分支只包含 softplus 形式；下界语义必须在预激活端完成。
 
@@ -114,7 +62,7 @@ Full-rank K3 将对齐友好的 Q/K/V/G 宽投影合并为 `fused_qkvg_proj`；�
 
 共享专家和 routed experts 都读取 post-attention RMSNorm 后的 hidden states。只要输入就绪，两条分支即可独立计算，直到最终输出相加时才需要会合。
 
-在 `f3ca9cb559` 之前，`_sbo_shared_overlap` 的启用条件排除了 `_shared_experts_attn_tp_comm`。这使 NPU attention-TP 兼容模式即使已具备备用流，也不能使用共享专家重叠。该提交移除此排除条件，并把共享分支拆成三个执行部分：
+`_sbo_shared_overlap` 的启用条件排除了 `_shared_experts_attn_tp_comm`。这使 NPU attention-TP 兼容模式即使已具备备用流，也不能使用共享专家重叠。该提交移除此排除条件，并把共享分支拆成三个执行部分：
 
 | 阶段 | 执行位置 | 目的 |
 | --- | --- | --- |
@@ -122,7 +70,7 @@ Full-rank K3 将对齐友好的 Q/K/V/G 宽投影合并为 `fused_qkvg_proj`；�
 | Shared MLP | 备用流 | 与 routed 分支计算及 EP 通信重叠 |
 | 输出 reduce-scatter | 主流、attention-TP 组 | 将共享专家部分和还原为本 rank 的 token 行 |
 
-同一提交同时调整了 NPU 的发射时机：在 router、TopK 和 latent down projection 之前启动共享分支，使输入一旦就绪就开始 all-gather，并让共享 MLP 的前置工作尽早进入设备执行队列。源码注释提出的动机之一，是让共享分支较轻的 DynamicQuant 有机会在 routed GroupedMatmul 开始前完成；是否达到这一重叠效果需要通过 950DT trace 确认。
+同一提交同时调整了 NPU 的发射时机：在 router、TopK 和 latent down projection 之前启动共享分支，使输入一旦就绪就开始 all-gather，并让共享 MLP 的前置工作尽早进入设备执行队列。让共享分支较轻的 DynamicQuant 有机会在 routed GroupedMatmul 开始前完成；
 
 #### 4.2.2 启用条件与数据布局
 
@@ -169,7 +117,7 @@ sequenceDiagram
 4. 主流尽量晚地等待事件：latent MoE 路径在 routed combine、latent reduction 和 up projection 后等待；非 latent 路径在专家输出产生后等待。
 5. 事件依赖满足后，主流完成共享分支的 reduce-scatter，再消费共享输出。
 
-`wait_stream`、`wait_event` 建立设备执行依赖，不要求为每个阶段做主机侧全设备同步。代码中接口名称带 `torch.cuda`，但本节描述的是 NPU 执行环境下的设备流适配语义。
+`wait_stream`、`wait_event` 建立设备执行依赖，不要求为每个阶段做主机侧全设备同步。
 
 HCCL collective 保留在主流，使本改动不需要把共享分支的通信迁移到备用流。该方案并没有把共享分支的 all-gather 和 reduce-scatter 同时并行化；被移到备用流的是共享 MLP。
 
@@ -263,8 +211,6 @@ FIAS V2 接入提交将更新顺序改为先完成 `graph.update()`，再调用 
 
 FIAS V2 的目标是改善对应 attention 阶段的执行效率，同时满足固定宽度验证和动态图长度要求。MLA 新增了 query 和输出的转置、连续化成本，因此应测量完整 `forward_mtp`，同时拆分 V2 算子时间与布局整理时间。
 
-本项不实现 FIAS V2 内部的计算分块，也未在该提交中提供足以量化 950DT 收益的基准结果。模型级评估必须覆盖上下文长度、batch、验证宽度和图命中率，不能把单次接口替换等同于端到端加速。
-
 ### 4.4 DeepEP MXFP8 分派
 
 `NPUW4A8MXFP4MoEMethod` 在加载 w13 时设置两类 dispatcher 输出：normal 使用 BF16，low-latency 使用 MXFP8。原因是 A5 normal MXFP8 分派受单机支持范围限制，保留 normal BF16 能兼容 `--deepep-mode auto` 中的多机 prefill。
@@ -328,7 +274,7 @@ situ_mxfp8_quant(
 
 输出使用容量 shape，保证后续 GMM 接口不需要根据设备侧有效行数重新分配张量。每行包含 96 个量化块，scale 组织为 `[48,2]`，与 `npu_dynamic_mx_quant` 的逻辑布局一致。`pertoken_scale` 是沿用的接口名称，此处实际携带的是块级 scale，并非每行一个标量。
 
-关闭融合开关后，runner 恢复原有 SiTU，再由 GMM2 执行动态 MX 量化。非 DeepEP 分派和其他量化方法仍采用各自原有路径。分派条件不会自动检查输入是否为 BF16 或宽度是否为 6144；如果已经选择融合路径但输入不符合算子约束，会报错，不存在自动回退承诺。
+关闭融合开关后，runner 恢复原有 SiTU，再由 GMM2 执行动态 MX 量化。
 
 #### 4.5.3 SiTU 数值语义
 
@@ -436,11 +382,9 @@ Prefix 命中后，直接对公开 shape 做 `index_select` 得到的仍是 NZ �
 
 ### 4.8 专家 placement 与性能观测
 
-#39 将逻辑 routed experts 与物理专家槽分开：物理容量为逻辑专家数加冗余专家数；TopK 仍选择逻辑专家，然后通过 `ExpertLocationDispatchInfo` 映射到实际装载权重的物理槽。存在有效 placement metadata 时，不能绕过映射而直接使用 fused-front 的预计算 TopK。
+逻辑 routed experts 与物理专家槽分开：物理容量为逻辑专家数加冗余专家数；TopK 仍选择逻辑专家，然后通过 `ExpertLocationDispatchInfo` 映射到实际装载权重的物理槽。存在有效 placement metadata 时，不能绕过映射而直接使用 fused-front 的预计算 TopK。
 
 DeepEP AUTO 的统计器按本轮模式计数：extend/prefill 的 normal 路径记录映射后的物理 TopK，low-latency 路径通过接收 hook 记录真实接收计数，两者在 collect 时汇总，避免把 padding 或模式切换误记为负载变化。K3 同时暴露 expert-location 模型配置，并接入按 rank 选择的 profiler trace。
-
-本项为性能分析和 EPLB 正确运行提供条件。是否降低尾时延需要在相同路由负载下验证；不能用“支持负载均衡元数据”代替均衡策略已生效或吞吐已提高的结论。
 
 ## 5 实现接口设计
 
@@ -462,7 +406,7 @@ DeepEP AUTO 的统计器按本轮模式计数：extend/prefill 的 normal 路径
 
 SiTU 的 `group_list_type=1` 为逐专家计数和，0 为累计边界的末值。Python 包装检查二维宽度和 group_list_type，native host 进一步检查 dtype、连续性、设备、非空容量和正参数；已选融合但形状不支持时会报错，不自动降级。
 
-### 5.1 源码模块映射
+### 5.1 源码模块
 
 | 仓库 | 模块（相对仓库根目录） | 职责 |
 | --- | --- | --- |
@@ -479,9 +423,7 @@ SiTU 的 `group_list_type=1` 为逐专家计数和，0 为累计边界的末值�
 
 ## 6 安全配置设计
 
-本设计不增加网络监听、身份认证、密钥或用户权限接口，沿用 SGLang 服务的部署边界。这里的安全配置重点是模型配置可信、请求状态隔离、设备内存访问有效和执行依赖完整。
-
-仅从可信来源加载模型、draft 配置和算子库，并固定模型与软件版本；不把开发启动脚本中的远端地址、日志路径或临时绕过检查设置作为推荐配置。模型特征、KV、概率和状态快照属于请求数据，常态日志不输出其完整内容；调试产物按既有访问权限和保留策略管理。上述是部署要求，本文引用的提交未新增对应的认证或日志脱敏实现。
+不涉及
 
 ### 6.1 配置与集成条件
 
@@ -492,10 +434,6 @@ SiTU 的 `group_list_type=1` 为逐专家计数和，0 为累计边界的末值�
 | `SGLANG_NPU_MOE_SITU_MXFP8_FUSED` | 默认 `True`，仅在匹配的 DeepEP＋SiTU＋W4A8 路径生效 | GMM1 输出为连续 BF16、宽度 6144；`linear_beta` 非空且为正 |
 | 外部算子库 | 包含指定提交的 A5 算子构建 | 具有 `situ_mxfp8_quant` 注册、E4M3/E8M0 dtype 与所需 CANN 支持 |
 | 下游 GMM2 | 通过 payload、scale、group metadata 联合消费 | 保持 MXFP8 块布局，跳过重复量化，不消费无效尾部 |
-
-软件兼容性以实际构建和验证结果为准。部署记录应固定 950DT 驱动、CANN、PyTorch、`torch_npu`、SGLang 与 `sgl-kernel-npu` 的实际版本，并通过接口和运行验证确认兼容性。
-
-FIAS V2 是 DSpark 相关 attention 路径的优化；SiTU 融合由 MoE 量化和分派方式决定，两者不是同一个开关控制。普通生成场景可能命中融合和双流，却不进入本项 FIAS V2 分支。
 
 | 补充配置 | 默认 / 条件 | 约束和回退边界 |
 | --- | --- | --- |
@@ -533,72 +471,15 @@ FIAS V2 是 DSpark 相关 attention 路径的优化；SiTU 融合由 MoE 量化�
 
 同一提交包含基准：容量 32768、有效行数 32，分别对原 SiTU＋动态量化路径和融合路径预热 5 次、测量 50 次，输出 p50 和平均时延。测量包含显式设备同步。此配置着重体现容量远大于有效行数的场景，不能单独代表高占用 batch 的收益。
 
-这些是源码中已存在的测试和基准定义。本次文档编制没有在 950DT 上执行它们，也没有得到双流、FIAS V2 或融合算子的新增性能测量结果。代码中其他平台的双流性能注释不作为本文的 950DT 实测依据。
-
 #### 7.1.2 正确性验证矩阵
 
-| 对象 | 关键场景 | 检查内容 |
-| --- | --- | --- |
-| 双流 | Shared TP1 / attention-TP；单请求 / 多请求；空 DP rank；不同 routed 耗时 | 与串行参考的 MoE 输出一致；AG/RS 后行序匹配；无早读、缓冲覆盖或 collective 次序错误 |
-| 双流图执行 | 多次 capture/replay；复用同一输入池；前后轮数据显著不同 | Event 依赖覆盖当前轮输入；不读取上一轮共享输出；重放中无生命周期问题 |
-| FIAS V2 eager | MLA 固定宽度；MHA TND；头 padding；不同上下文和页边界 | V1/V2 有效输出、mask 与行序一致；KV 覆盖范围正确；裁剪与补齐不污染有效 token |
-| FIAS V2 graph | KV 长度逐轮递增；较大 capture batch；IDLE rank；DSpark 最终 KV 边界 | 更新 `actual_seq_kvlen` 生效；update 完成后 replay；不重复添加 verify 宽度 |
-| SiTU 融合 | 两类 group list、两种索引 dtype；零有效行；满容量；不均衡 expert counts | 有效前缀对应正确；cumulative 与 count 结果一致；GMM2 不使用无效尾部 |
-| SiTU 数值 | 大正/负输入、零、小值、MX block 舍入边界、自定义 beta | 对齐 BF16 舍入边界；检查 payload/scale 联合反量化误差和有限值边界 |
-| GMM 联合 | 融合开关开/关；同一 FP4 权重；相同专家路由 | GMM2 无重复量化，expert 输出及 MoE combine 输出在约定容差内一致 |
-| 整模型 | 相同 checkpoint、请求与采样配置；DSpark 图命中/回退 | Logits、生成质量及接受长度分布满足业务精度要求 |
-
-零有效行测试应检查“下游不消费这些行”，不能检查未初始化 payload 一定为零。现有精度用例未覆盖 cumulative＋int32、极端数值、零有效行和图捕获，需按上述矩阵补充。
-
-#### 7.1.3 性能消融
-
-固定 checkpoint、TP/DP/EP、共享专家 TP 配置、上下文长度、输出长度、并发、验证宽度、采样参数、图配置和路由负载，分别建立以下对照：
-
-| 对照组 | 双流 | FIAS V2 | SiTU 融合 | 目的 |
-| --- | --- | --- | --- | --- |
-| 基线 | 串行共享分支 | 原接口 | 分离实现 | 建立同条件参考 |
-| 单项 A | 启用 | 原接口 | 分离实现 | 评估共享 MLP 重叠 |
-| 单项 B | 串行共享分支 | 启用 | 分离实现 | 评估 attention 接入 |
-| 单项 C | 串行共享分支 | 原接口 | 启用 | 评估融合与有效行处理 |
-| 联合 | 启用 | 启用 | 启用 | 评估最终关键路径与相互影响 |
-
-串行双流对照应保持相同 EP 和共享专家分片，使用只改变 shared 分支调度的受控构建。改为无 EP 或移除共享专家会同时改变计算和通信，不能作为有效对照。FIAS V2 和 SiTU 融合的对照使用第 6.1 节中的两个环境开关。
-
-记录指标包括：
-
-- 端到端输出吞吐、ITL/TPOT、TTFT 及长尾；DSpark 同时记录接受长度和实际验证 token 数。
-- Shared MLP、routed 分支、AG/RS、事件等待分别占用的时间，以及它们在 trace 中的真实重叠范围。
-- FIAS V2 内核、query/output 布局整理、graph update 和 replay 的完整开销。
-- SiTU＋Quant 的完整调用时间、有效行数/容量比、GMM2 前的动态量化调用是否消失，以及融合前后带宽开销。
-
-SiTU 基准需要同时覆盖 `V≈C` 和 `V≪C`，才能区分融合收益与跳过无效行的收益。首轮编译、算子预热和图捕获应与稳态测试分开记录；不能把初始化成本的差异计为稳态 token 加速。
-
-### 7.2 扩展验证矩阵与覆盖证据
-
-| 对象 / SR | 固定快照已有证据 | 仍需执行或补充的验证 |
-| --- | --- | --- |
-| QKVG / P-SR-01 | `6d48f564a6`、`6ffc661d88` 的模型与 loader 改动 | TP=attention TP 和不相等场景；各 packed shard 的权重和值对照 |
-| stride verify / P-SR-01 | 外部 `34c6ad7` 的五类输入 stride 改动 | Packed 非连续 Q/K/V/a/b 与连续参考；预激活 lower_bound；每步快照；复制次数和时间 |
-| MXFP8 dispatch / P-SR-04 | `test/registered/unit/layers/moe/test_npu_mxfp8_deepep_dispatch.py` 的 CPU mock | NPU payload/scale 精度、空 rank、normal/low-latency 切换和多机 prefill |
-| NPU acceptance / P-SR-05 | `c4ab122939` 的设备分派与随机数宽度修正 | B>1、不同行接受长度、全接受/首步拒绝、概率统计与越界检查 |
-| NZ / P-SR-06 | `test/registered/unit/npu/attention/test_npu_mla_cache.py` 的逻辑页与物理布局用例 | NPU 实际 scatter、prefix 命中后的 logits、跨页、图重放及布局切换后的重建 |
-| Shared TP / P-SR-02 | #35 的参数检查、子组和模型分片实现 | S=1、中间因子、S=A，基础双流和串行对照，collective 次序及内存峰值 |
-| Placement/观测 / P-SR-07 | `test_kimi_k3_expert_location.py`、`test_expert_distribution_deepep_auto.py`、`test_profiler_rank_filter.py`（位于 registered/unit 对应模块目录） | 冗余专家实际装载、模式混合统计、多 rank trace 与真实物理负载核对 |
-
-已有源码用例只表示已交付验证代码，本次未执行 CPU 或 NPU 测试。性能基线应在第 7.1 节三项对照之外，增加 QKVG、stride verify、dispatch、NZ、共享 TP 与 EPLB 的独立对照；其余配置和路由负载保持一致。量化分派和模型分片若没有现成关闭开关，应使用仅回退对应改动的受控构建，不能编造配置开关。
-
-记录吞吐、TTFT、TPOT/ITL 的中位数和长尾、接受长度分布、实际 token 数、有效专家行/容量、内存峰值与重复量化调用。区分 prefill、decode、DSpark verify 和 prefix hit，分别报告编译/捕获成本与预热后的稳态表现。业务 SLA 与整模型精度阈值未在需求中给出，验收前应明确，本文不虚构具体目标值。
-
-## 8 分配需求
-
-| SR | 分配模块 / 责任域 | 交付与验收证据 | 状态 |
-| --- | --- | --- | --- |
-| P-SR-01 | K3 模型/loader；Ascend KDA backend；外部 KDA kernel | 权重映射、非连续输入数值与复制成本对照 | 实现已合入；设备和整模型验收待执行 |
-| P-SR-02 | K3 MoE；并行参数与通信组；性能验证 | 基础双流依赖、共享 TP 子组、同配置 trace | 已合入；不同 S 的收益待测 |
-| P-SR-03 | Ascend attention；NPU graph runner；CANN 集成 | V2 长度、布局、IDLE 和多轮 replay | 已接入；软件栈联合验收待执行 |
-| P-SR-04 | DeepEP dispatcher；MoE runner/quant method；外部 A5 SiTU 算子 | CPU 分派用例、SiTU 精度/基准、GMM 联合对照 | 两仓库已合入；端到端收益未测 |
-| P-SR-05 | DSpark accept；sgl-kernel-npu sampling | 随机数布局及多请求接受边界对照 | 接口修正已合入；设备回归待执行 |
-| P-SR-06 | NPU MLA pool；attention prefix 读取 | NZ 索引/反排单测与真实缓存复用验证 | 写读适配已合入；NPU 联合验收待执行 |
-| P-SR-07 | K3 placement；EPLB recorder；profiler | 模式统计、专家映射、rank 过滤单测与 trace | 协作项已合入；真实负载评估待执行 |
-
-分配按模块责任域给出，不将 Git 提交作者自动等同后续交付负责人。950DT 验收必须固定本章引用的两仓库构建和软件版本；DSpark 基础适配及早期内置算子分别见 [DSpark 设计](kimi_k3_dspark_design.md) 与 [NPU 算子设计](dspark_ascend_npu_kernels_design.md)，不混用两代接口契约。
+| 对象 | 关键场景 |
+| --- | --- |
+| 双流 | Shared TP1 / attention-TP；单请求 / 多请求；空 DP rank；不同 routed 耗时 |
+| 双流图执行 | 多次 capture/replay；复用同一输入池；前后轮数据显著不同 |
+| FIAS V2 eager | MLA 固定宽度；MHA TND；头 padding；不同上下文和页边界 |
+| FIAS V2 graph | KV 长度逐轮递增；较大 capture batch；IDLE rank；DSpark 最终 KV 边界 |
+| SiTU 融合 | 两类 group list、两种索引 dtype；零有效行；满容量；不均衡 expert counts |
+| SiTU 数值 | 大正/负输入、零、小值、MX block 舍入边界、自定义 beta |
+| GMM 联合 | 融合开关开/关；同一 FP4 权重；相同专家路由 |
+| 整网 | 相同 checkpoint、请求与采样配置；DSpark 图命中/回退 |
