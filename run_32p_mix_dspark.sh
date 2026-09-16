@@ -99,7 +99,6 @@ do
             --mem-fraction-static 0.75 \
             --max-mamba-cache-size 180 \
             --chunked-prefill-size 20480 \
-            --disable-cuda-graph \
             --reasoning-parser kimi_k3 \
             --max-running-requests 64 \
             --host 0.0.0.0 \
