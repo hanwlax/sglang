@@ -387,11 +387,17 @@ class AscendKDAAttnBackend(KDAAttnBackend):
 
         draft_token_num = forward_batch.spec_info.draft_token_num
         batch_size = query_start_loc.shape[0] - 1
+        if batch_size == 0:
+            return mixed_qkv.new_empty(
+                (1, seq_len, layer.v_dim // layer.head_v_dim, layer.head_v_dim)
+            )
         num_dense_tokens = batch_size * draft_token_num
         ragged_layout = forward_batch.spec_info.ragged_verify_layout
         if ragged_layout is None and seq_len == num_dense_tokens:
             dense_token_indices = None
-            dense_qkv = mixed_qkv.view(batch_size, draft_token_num, -1)
+            dense_qkv = mixed_qkv.view(
+                batch_size, draft_token_num, mixed_qkv.shape[-1]
+            )
             dense_a = a
             dense_b = b
         else:
@@ -402,7 +408,7 @@ class AscendKDAAttnBackend(KDAAttnBackend):
             )
             dense_qkv = self._scatter_tokens_to_dense(
                 mixed_qkv, dense_token_indices, num_dense_tokens
-            ).view(batch_size, draft_token_num, -1)
+            ).view(batch_size, draft_token_num, mixed_qkv.shape[-1])
             dense_a = self._scatter_gate_to_dense(
                 a, dense_token_indices, num_dense_tokens
             )
@@ -426,7 +432,7 @@ class AscendKDAAttnBackend(KDAAttnBackend):
             device=mixed_qkv.device,
         )
         processed_qkv = torch.ops.npu.causal_conv1d(
-            dense_qkv.reshape(num_dense_tokens, -1).contiguous(),
+            dense_qkv.reshape(num_dense_tokens, dense_qkv.shape[-1]).contiguous(),
             self._get_conv_weights_t(layer, mixed_qkv.dtype),
             conv_states=conv_states,
             bias=layer.bias,
