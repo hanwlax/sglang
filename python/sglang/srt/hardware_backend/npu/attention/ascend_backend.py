@@ -78,6 +78,10 @@ def _reshape_kv_for_fia_nz(
 
 @dataclass
 class ForwardMetadata:
+    # PCG normalizes MIXED to EXTEND for compiled guards. Eager attention
+    # must retain the original mode to select the mixed-batch FIA kernel.
+    is_mixed: bool = False
+
     # calculated map for kv positions [bs * maxseqlen]
     block_tables: Optional[torch.Tensor] = None
 
@@ -478,7 +482,9 @@ class AscendAttnBackend(AttentionBackend):
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init the metadata for a forward pass."""
-        self.forward_metadata = ForwardMetadata()
+        self.forward_metadata = ForwardMetadata(
+            is_mixed=forward_batch.forward_mode == ForwardMode.MIXED
+        )
         seq_lens_max = forward_batch.seq_lens.max()
         if forward_batch.forward_mode.is_target_verify():
             if (
@@ -1295,6 +1301,18 @@ class AscendAttnBackend(AttentionBackend):
         sinks: Optional[torch.Tensor] = None,
         slopes: Optional[torch.Tensor] = None,
     ):
+        if self.forward_metadata.is_mixed:
+            return self.forward_mixed(
+                q,
+                k,
+                v,
+                layer,
+                forward_batch,
+                save_kv_cache,
+                q_rope=q_rope,
+                k_rope=k_rope,
+                topk_indices=topk_indices,
+            )
         if is_mla_preprocess_enabled() and self.use_mla:
             # DSA callers set save_kv_cache based on whether preprocessing was used.
             # Only override it for the existing non-sparse MLA path.

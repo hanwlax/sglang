@@ -287,12 +287,6 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     _backend_can_run_prefill_cuda_graph = None
 
     def __init__(self, model_runner: ModelRunner):
-        if get_schedule().enable_mixed_chunk:
-            backend = get_exec().graph.cuda_graph_config.prefill.backend
-            assert backend == Backend.BREAKABLE, (
-                "Mixed chunk prefill requires the breakable prefill CUDA "
-                f"graph backend; got '{backend}'."
-            )
         super().__init__(model_runner)
         self._backend_can_run_prefill_cuda_graph = getattr(
             model_runner.attn_backend, "can_run_prefill_cuda_graph", None
