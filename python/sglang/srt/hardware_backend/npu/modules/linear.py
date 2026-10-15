@@ -31,6 +31,11 @@ def prefill_gate_up(
     ):
         import torch_npu
 
+        # The ungrouped BF16 path requires ND inputs, including on Ascend 950.
+        # Contiguous strides alone do not rule out an internal NZ format.
+        if any(torch_npu.get_npu_format(t) != 2 for t in (x, layer.weight)):
+            return layer(x)
+
         # A3 MatMulV2/V3 routing changes K-block accumulation order. GMM avoids
         # the legacy route that makes Qwen2.5-VL lose the second image description.
         return (

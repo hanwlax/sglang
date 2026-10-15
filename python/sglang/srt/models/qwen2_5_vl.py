@@ -732,11 +732,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 prefix=add_prefix("model", prefix),
                 decoder_layer_type=partial(
                     Qwen2DecoderLayer,
-                    use_npu_gmm=(
-                        is_npu()
-                        and quant_config is None
-                        and torch.npu.get_device_name().startswith("Ascend910_93")
-                    ),
+                    use_npu_gmm=is_npu() and quant_config is None,
                 ),
             )
 

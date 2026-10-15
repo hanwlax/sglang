@@ -115,6 +115,15 @@ class TestNPUQwenVLPrefill(CustomTestCase):
             with self.subTest(case=i):
                 self.assert_fallback(layer, x, ForwardMode.EXTEND)
 
+        # Internal formats depend on the installed backend's capabilities.
+        # Mock only its format query; check the real linear fallback result.
+        with patch.object(torch_npu, "get_npu_format", return_value=29):
+            self.assert_fallback(
+                self.make_layer(),
+                torch.ones(8, 64, device="npu", dtype=torch.bfloat16),
+                ForwardMode.EXTEND,
+            )
+
     def test_custom_methods_and_adapter_wrappers_are_preserved(self):
         class CustomMethod(UnquantizedLinearMethod):
             def apply(self, layer, x, bias=None):
