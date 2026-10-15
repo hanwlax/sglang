@@ -86,8 +86,8 @@ linear and GMM. This is sampled FP64 coverage, not full-matrix FP64 coverage.
 
 One seed per shape is profiled with `torch_npu.profiler`, ten warmup calls and
 three alternating linear/GMM rounds of thirty calls. The script verifies the
-number of recorded matmul operations, keeps the raw `op_statistic.csv` and
-`op_summary.csv`, and reports the median of the three per-round mean device
+number of recorded matmul operations, keeps the generated profiler CSV files
+(including `op_statistic.csv`), and reports the median of the three per-round mean device
 times. M=1 here is a one-token **prefill**; ordinary decode keeps linear.
 
 These are warmed, repeatedly reused tensors and operator device times. They do
