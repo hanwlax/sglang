@@ -43,7 +43,11 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import (
+    ForwardBatch,
+    ForwardMode,
+    PPProxyTensors,
+)
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
     kv_cache_scales_loader,
@@ -67,8 +71,10 @@ class Qwen2MLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_npu_gmm: bool = False,
     ) -> None:
         super().__init__()
+        self.use_npu_gmm = use_npu_gmm
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -93,11 +99,17 @@ class Qwen2MLP(nn.Module):
         self,
         x: torch.Tensor,
         forward_batch: ForwardBatch = None,
+        forward_mode: Optional[ForwardMode] = None,
     ) -> torch.Tensor:
         if get_exec().deterministic.rl_on_policy_target is not None:
             x = x.bfloat16()
 
-        gate_up, _ = self.gate_up_proj(x)
+        if self.use_npu_gmm:
+            from sglang.srt.hardware_backend.npu.modules.linear import prefill_gate_up
+
+            gate_up, _ = prefill_gate_up(self.gate_up_proj, x, forward_mode)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x, forward_batch=forward_batch)
         return x
@@ -241,6 +253,7 @@ class Qwen2DecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
+        use_npu_gmm: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -273,6 +286,7 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
+            use_npu_gmm=use_npu_gmm,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -306,7 +320,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual, quant_linear=self.mlp.gate_up_proj
         )
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, forward_mode=forward_batch.forward_mode)
         return hidden_states, residual
 
 

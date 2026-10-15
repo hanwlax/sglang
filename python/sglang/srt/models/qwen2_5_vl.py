@@ -70,7 +70,7 @@ from sglang.srt.managers.schedule_batch import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.models.qwen2 import Qwen2Model
+from sglang.srt.models.qwen2 import Qwen2DecoderLayer, Qwen2Model
 from sglang.srt.models.utils import RotaryPosMixin, WeightsMapper, permute_inv
 from sglang.srt.multimodal.mm_utils import run_dp_sharded_mrope_vision_model
 from sglang.srt.multimodal.vit_cuda_graph_runner import ViTCudaGraphRunner
@@ -730,6 +730,14 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module):
                 config,
                 quant_config,
                 prefix=add_prefix("model", prefix),
+                decoder_layer_type=partial(
+                    Qwen2DecoderLayer,
+                    use_npu_gmm=(
+                        is_npu()
+                        and quant_config is None
+                        and torch.npu.get_device_name().startswith("Ascend910_93")
+                    ),
+                ),
             )
 
             if self.pp_group.is_last_rank:
