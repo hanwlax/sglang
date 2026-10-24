@@ -3,8 +3,11 @@
 import torch
 
 from sglang.kernels.ops.gemm import npu_w8a8_block_fp8_grouped_matmul
-from sglang.srt.layers.moe.moe_runner import MoeRunner
-from sglang.srt.layers.moe.utils import MoeRunnerBackend, get_moe_runner_backend
+from sglang.srt.hardware_backend.npu.quantization.moe_utils import (
+    build_ascend_quant_info,
+    create_ascend_moe_runner,
+)
+from sglang.srt.layers.moe.utils import get_moe_runner_backend
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 
 
@@ -53,11 +56,13 @@ class NPUBlockFp8MoEMethod(Fp8MoEMethod):
         super().create_weights(layer, *args, with_bias=False, **kwargs)
 
     def create_moe_runner(self, layer, moe_runner_config):
-        layer.w13_kernel = _NPUBlockFp8MoEKernel()
-        layer.w2_kernel = _NPUBlockFp8MoEKernel()
         self.moe_runner_config = moe_runner_config
-        moe_runner_config.layer = layer
-        self.runner = MoeRunner(MoeRunnerBackend.ASCEND, moe_runner_config)
+        self.runner = create_ascend_moe_runner(
+            layer,
+            moe_runner_config,
+            w13_kernel=_NPUBlockFp8MoEKernel(),
+            w2_kernel=_NPUBlockFp8MoEKernel(),
+        )
         self._owns_moe_runner = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -72,14 +77,7 @@ class NPUBlockFp8MoEMethod(Fp8MoEMethod):
         )
 
     def apply(self, layer, dispatch_output):
-        from sglang.srt.layers.moe.moe_runner.ascend import AscendQuantInfo
-
         return self.runner.run(
             dispatch_output,
-            AscendQuantInfo(
-                w13_weight=layer.w13_weight,
-                w2_weight=layer.w2_weight,
-                w13_weight_scale=layer.w13_weight_scale_inv,
-                w2_weight_scale=layer.w2_weight_scale_inv,
-            ),
+            build_ascend_quant_info(layer),
         )
