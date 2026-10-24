@@ -8,28 +8,40 @@ from sglang.test.ci.ci_register import register_npu_ci
 
 register_npu_ci(est_time=1, suite="stage-a-unit-test-npu")
 
-# Load the quantization package first so `base_config`, `moe_methods`, and
-# `linear_method_npu` initialize in dependency order. Importing `fp4_moe_methods`
-# (or `linear_method_npu`) directly from a cold process triggers a circular
-# import: linear_method_npu -> base_config -> quantization/__init__ ->
-# gguf/unquant/gptq_moe -> moe_methods -> linear_method_npu (partially
-# initialized, `_get_float8_e8m0fnu_dtype` not yet defined). Initializing the
-# package first mirrors how the engine loads quantization at model-config time.
+# Initialize the quantization registry as in model-config loading.
 import sglang.srt.layers.quantization  # noqa: F401
-from sglang.srt.hardware_backend.npu.moe.activation import NPUSwigluMxfp8Quant
+from sglang.srt.hardware_backend.npu.moe.activation import (
+    NPUSwiglu,
+    NPUSwigluMxfp8Quant,
+    NPUSwigluWithLimit,
+)
+from sglang.srt.hardware_backend.npu.quantization.block_fp8_moe import (
+    NPUBlockFp8MoEMethod,
+    _NPUBlockFp8MoEKernel,
+)
 from sglang.srt.hardware_backend.npu.quantization.fp4_moe_methods import (
     NPUW4A8MXFP4FusedMoEMethod,
 )
 from sglang.srt.hardware_backend.npu.quantization.moe_methods import (
+    NPUW4A8MXFP4MoEMethod,
     _pair_pack_mxfp_act_scale,
+    w4a8_mxfp_gmm,
+)
+from sglang.srt.hardware_backend.npu.quantization.moe_utils import (
     prepare_w4a8_mxfp_weight,
     process_npu_fp4_expert_weights,
     reshape_w4a8_mxfp_weight_scale_for_npu,
-    w4a8_mxfp_gmm,
+)
+from sglang.srt.hardware_backend.npu.quantization.online_moe_methods import (
+    NPUMXFP8OnlineMoEMethod,
 )
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
+from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+from sglang.srt.layers.moe.moe_runner.ascend import AscendRunnerCore
 from sglang.srt.layers.moe.token_dispatcher import deepep
+from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
+from sglang.srt.runtime_context import get_context
 from sglang.test.test_utils import CustomTestCase
 
 
@@ -133,7 +145,7 @@ class TestPrepareW4A8MxfpWeight(CustomTestCase):
         formatted_weight = torch.arange(16, dtype=torch.uint8).view(1, 2, 8)
 
         with patch(
-            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            "sglang.srt.hardware_backend.npu.quantization.moe_utils.npu_format_cast",
             return_value=formatted_weight,
         ):
             prepared_weight, prepared_scale = prepare_w4a8_mxfp_weight(weight, scale)
@@ -161,7 +173,7 @@ class TestPrepareW4A8MxfpWeight(CustomTestCase):
                 scale = scale.repeat(3).view(2, 3, 4)
                 expected = expected.repeat(3).view(2, 3, 4)
                 with patch(
-                    "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+                    "sglang.srt.hardware_backend.npu.quantization.moe_utils.npu_format_cast",
                     side_effect=lambda weight, **kwargs: weight,
                 ):
                     _, prepared_scale = prepare_w4a8_mxfp_weight(weight, scale)
@@ -188,7 +200,7 @@ class TestPrepareW4A8MxfpWeight(CustomTestCase):
             return tensor
 
         with patch(
-            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            "sglang.srt.hardware_backend.npu.quantization.moe_utils.npu_format_cast",
             side_effect=format_cast,
         ):
             prepared_weight, _ = prepare_w4a8_mxfp_weight(weight, scale, npu_format=29)
@@ -203,7 +215,7 @@ class TestPrepareW4A8MxfpWeight(CustomTestCase):
     def test_rejects_missing_fp4_support(self):
         with (
             patch(
-                "sglang.srt.hardware_backend.npu.quantization.moe_methods._get_float4_e2m1fn_x2_dtype",
+                "sglang.srt.hardware_backend.npu.quantization.moe_utils._get_float4_e2m1fn_x2_dtype",
                 return_value=None,
             ),
             self.assertRaisesRegex(RuntimeError, "requires float4 support"),
@@ -230,7 +242,7 @@ class TestPrepareW4A8MxfpWeight(CustomTestCase):
             originals[prefix] = (weight, scale, scale.weight_loader)
 
         with patch(
-            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            "sglang.srt.hardware_backend.npu.quantization.moe_utils.npu_format_cast",
             side_effect=lambda weight, **kwargs: weight,
         ):
             process_npu_fp4_expert_weights(layer)
@@ -797,49 +809,166 @@ class TestW4A8MxfpGmmInputScale(unittest.TestCase):
         )
 
 
-class TestRunnerDelegation(unittest.TestCase):
-    def test_apply_delegates_with_dsv4_scale_names(self):
-        method = NPUW4A8MXFP4FusedMoEMethod(prefix="test")
-        expected = object()
-        method.runner = MagicMock()
-        method.runner.run.return_value = expected
-        layer = SimpleNamespace(
-            w13_weight=MagicMock(),
-            w13_weight_scale_inv=MagicMock(),
-            w2_weight=MagicMock(),
-            w2_weight_scale_inv=MagicMock(),
+class TestRunnerDelegation(CustomTestCase):
+    def setUp(self):
+        super().setUp()
+        context = get_context().override_server_args(model_path="dummy")
+        context.install()
+        self.addCleanup(context.restore)
+
+    @staticmethod
+    def _methods():
+        return (
+            NPUW4A8MXFP4FusedMoEMethod(prefix="test"),
+            NPUBlockFp8MoEMethod(
+                Fp8Config(
+                    is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+                )
+            ),
+            Fp8MoEMethod(Fp8Config(is_fp4_experts=True)),
         )
-        dispatch_output = object()
 
-        output = method.apply(layer, dispatch_output)
+    def test_apply_delegates_with_dsv4_scale_names(self):
+        layer = SimpleNamespace(
+            w13_weight=torch.zeros(1, 4, 4),
+            w13_weight_scale_inv=torch.ones(1, 4, 1),
+            w2_weight=torch.zeros(1, 4, 2),
+            w2_weight_scale_inv=torch.full((1, 4, 1), 2.0),
+            # These are different conventions; the checkpoint paths must keep
+            # using scale_inv and must not start forwarding optional bias.
+            w13_weight_scale=object(),
+            w2_weight_scale=object(),
+            w13_weight_bias=object(),
+        )
+        dispatch_output = SimpleNamespace(hidden_states=torch.zeros(1, 4))
 
-        self.assertIs(output, expected)
-        method.runner.run.assert_called_once()
-        self.assertIs(method.runner.run.call_args.args[0], dispatch_output)
-        quant_info = method.runner.run.call_args.args[1]
-        self.assertIs(quant_info.w13_weight_scale, layer.w13_weight_scale_inv)
-        self.assertIs(quant_info.w2_weight_scale, layer.w2_weight_scale_inv)
+        with patch("sglang.srt.layers.quantization.fp8._is_npu", True):
+            for method in self._methods():
+                with self.subTest(method=type(method).__name__):
+                    if isinstance(method, NPUW4A8MXFP4FusedMoEMethod):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "not been initialized"
+                        ):
+                            method.apply(layer, dispatch_output)
+                    expected = object()
+                    method.moe_runner_config = MoeRunnerConfig()
+                    method.runner = MagicMock()
+                    method.runner.run.return_value = expected
+
+                    output = method.apply(layer, dispatch_output)
+
+                    self.assertIs(output, expected)
+                    method.runner.run.assert_called_once()
+                    self.assertIs(method.runner.run.call_args.args[0], dispatch_output)
+                    quant_info = method.runner.run.call_args.args[1]
+                    self.assertIs(quant_info.w13_weight, layer.w13_weight)
+                    self.assertIs(quant_info.w2_weight, layer.w2_weight)
+                    self.assertIs(
+                        quant_info.w13_weight_scale, layer.w13_weight_scale_inv
+                    )
+                    self.assertIs(quant_info.w2_weight_scale, layer.w2_weight_scale_inv)
+                    self.assertIsNone(quant_info.w13_weight_bias)
 
     def test_create_runner_installs_internal_kernels_before_runner(self):
-        method = NPUW4A8MXFP4FusedMoEMethod(prefix="test")
-        layer = SimpleNamespace()
-        config = SimpleNamespace(layer=None)
-        backend = MagicMock()
-        backend.is_auto.return_value = True
+        # The real constructor reads both kernels to select the activation.
+        # Installing kernels after construction would fail here.
+        with patch("sglang.srt.layers.quantization.fp8._is_npu", True):
+            methods = (*self._methods(), NPUMXFP8OnlineMoEMethod())
+            for method in methods:
+                with self.subTest(method=type(method).__name__):
+                    layer = SimpleNamespace()
+                    config = MoeRunnerConfig()
+                    method.create_moe_runner(layer, config)
 
-        with (
-            patch("sglang.srt.layers.moe.moe_runner.runner.MoeRunner") as moe_runner,
-            patch(
-                "sglang.srt.layers.moe.utils.get_moe_runner_backend",
-                return_value=backend,
-            ),
+                    self.assertIs(config.layer, layer)
+                    self.assertIs(method.runner.config, config)
+                    self.assertIs(method.runner.runner_backend, MoeRunnerBackend.ASCEND)
+                    if isinstance(method, NPUW4A8MXFP4FusedMoEMethod):
+                        self.assertIs(layer.w13_kernel, method.w13_kernel)
+                        self.assertIs(layer.w2_kernel, method.w2_kernel)
+                    if isinstance(method, NPUBlockFp8MoEMethod):
+                        self.assertTrue(method._owns_moe_runner)
+                        self.assertIs(method.moe_runner_config, config)
+                        self.assertIsNotNone(method.runner.runner_core.activation)
+                    elif type(method) is Fp8MoEMethod:
+                        self.assertFalse(method._owns_moe_runner)
+                    elif isinstance(method, NPUMXFP8OnlineMoEMethod):
+                        self.assertIs(method.moe_runner_config, config)
+                        self.assertIsNone(method._aiter_runner)
+                        self.assertIsNotNone(layer.w13_kernel.hidden_states_quantizer)
+                        self.assertIsNone(layer.w2_kernel.hidden_states_quantizer)
+
+    def test_fusion_uses_w13_when_kernel_settings_differ(self):
+        """A nonfused W13 needs activation even when W2 enables fusion."""
+        for w13_fused, w2_fused in (
+            (False, True),
+            (True, False),
+            (False, False),
+            (True, True),
         ):
-            method.create_moe_runner(layer, config)
+            with self.subTest(w13_fused=w13_fused, w2_fused=w2_fused):
+                w13 = NPUW4A8MXFP4MoEMethod()
+                w2 = NPUW4A8MXFP4MoEMethod()
+                w13.use_fused_gmm1 = w13_fused
+                w2.use_fused_gmm1 = w2_fused
+                config = MoeRunnerConfig(
+                    layer=SimpleNamespace(w13_kernel=w13, w2_kernel=w2)
+                )
 
-        self.assertIs(layer.w13_kernel, method.w13_kernel)
-        self.assertIs(layer.w2_kernel, method.w2_kernel)
-        self.assertIs(config.layer, layer)
-        moe_runner.assert_called_once()
+                runner = AscendRunnerCore(config)
+
+                if w13_fused:
+                    self.assertIsNone(runner.activation)
+                else:
+                    self.assertIsInstance(runner.activation, NPUSwiglu)
+
+    def test_unfused_activation_uses_w2_input_format(self):
+        """Mixed kernels must prepare clipped activations for the W2 consumer."""
+        native = _NPUBlockFp8MoEKernel()
+        mxfp4 = NPUW4A8MXFP4MoEMethod()
+        for w13, w2, activation_type in (
+            (native, mxfp4, NPUSwigluMxfp8Quant),
+            (mxfp4, native, NPUSwigluWithLimit),
+        ):
+            with self.subTest(w13=type(w13).__name__, w2=type(w2).__name__):
+                config = MoeRunnerConfig(
+                    layer=SimpleNamespace(w13_kernel=w13, w2_kernel=w2),
+                    swiglu_limit=7.0,
+                )
+
+                runner = AscendRunnerCore(config)
+
+                self.assertIsInstance(runner.activation, activation_type)
+
+    def test_unsupported_backend_still_rejected_before_runner_creation(self):
+        layer = SimpleNamespace()
+        config = MoeRunnerConfig()
+        with patch(
+            "sglang.srt.layers.moe.utils.get_moe_runner_backend",
+            return_value=MoeRunnerBackend.TRITON,
+        ):
+            method = NPUW4A8MXFP4FusedMoEMethod()
+            with self.assertRaisesRegex(ValueError, "requires the Ascend MoE runner"):
+                method.create_moe_runner(layer, config)
+            self.assertIsNone(method.runner)
+
+        with patch(
+            "sglang.srt.hardware_backend.npu.quantization.block_fp8_moe.get_moe_runner_backend",
+            return_value=MoeRunnerBackend.TRITON,
+        ):
+            with self.assertRaisesRegex(ValueError, "Block FP8 MoE on Ascend requires"):
+                NPUBlockFp8MoEMethod(Fp8Config())
+
+        with patch(
+            "sglang.srt.hardware_backend.npu.quantization.online_moe_methods.get_moe_runner_backend",
+            return_value=MoeRunnerBackend.TRITON,
+        ):
+            method = NPUMXFP8OnlineMoEMethod()
+            with self.assertRaisesRegex(ValueError, "MXFP8 MoE on Ascend requires"):
+                method.create_moe_runner(layer, config)
+
+        self.assertFalse(hasattr(layer, "w13_kernel"))
+        self.assertFalse(hasattr(layer, "w2_kernel"))
 
 
 class TestProcessWeightsAfterLoadingZeroScale(CustomTestCase):
@@ -900,7 +1029,7 @@ class TestProcessWeightsAfterLoadingZeroScale(CustomTestCase):
             return weight
 
         with patch(
-            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            "sglang.srt.hardware_backend.npu.quantization.moe_utils.npu_format_cast",
             side_effect=format_cast,
         ):
             self._method().process_weights_after_loading(layer)
