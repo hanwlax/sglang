@@ -23,12 +23,14 @@ from sglang.srt.hardware_backend.npu.quantization.fp4_moe_methods import (
 from sglang.srt.hardware_backend.npu.quantization.moe_methods import (
     _pair_pack_mxfp_act_scale,
     prepare_w4a8_mxfp_weight,
+    process_npu_fp4_expert_weights,
     reshape_w4a8_mxfp_weight_scale_for_npu,
     w4a8_mxfp_gmm,
 )
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 from sglang.srt.layers.moe.token_dispatcher import deepep
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
+from sglang.test.test_utils import CustomTestCase
 
 
 class TestFP4MethodGate(unittest.TestCase):
@@ -122,7 +124,7 @@ class TestReshapeMxfp4ScaleForNpu(unittest.TestCase):
             )
 
 
-class TestPrepareW4A8MxfpWeight(unittest.TestCase):
+class TestPrepareW4A8MxfpWeight(CustomTestCase):
     def test_uses_shared_weight_and_scale_layout(self):
         # A wrong transpose or scale packing makes both ModelSlim W4A8 and
         # DeepSeek-V4 W4A8 read different blocks from the same checkpoint.
@@ -140,6 +142,117 @@ class TestPrepareW4A8MxfpWeight(unittest.TestCase):
         self.assertTrue(
             torch.equal(prepared_scale, scale.view(1, 2, 2, 2).transpose(1, 2))
         )
+
+    def test_decodes_fp32_scales_without_rebiasing_raw_e8m0(self):
+        # The same GMM layout must preserve byte-valued HF scales, decoded
+        # powers of two, and ModelSlim / DeepSeek-V4's already encoded bytes.
+        raw_bytes = torch.tensor(
+            [0, 1, 126, 127, 128, 129, 254, 255], dtype=torch.uint8
+        )
+        exponents = torch.tensor([-126, -2, -1, 0, 1, 2, 3, 127])
+        cases = (
+            (raw_bytes, raw_bytes),
+            (raw_bytes.float(), raw_bytes),
+            (torch.exp2(exponents.float()), (exponents + 127).to(torch.uint8)),
+        )
+        weight = torch.zeros(2, 3, 64, dtype=torch.uint8)
+        for scale, expected in cases:
+            with self.subTest(dtype=scale.dtype, values=scale.tolist()):
+                scale = scale.repeat(3).view(2, 3, 4)
+                expected = expected.repeat(3).view(2, 3, 4)
+                with patch(
+                    "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+                    side_effect=lambda weight, **kwargs: weight,
+                ):
+                    _, prepared_scale = prepare_w4a8_mxfp_weight(weight, scale)
+
+                self.assertEqual(prepared_scale.dtype, torch.uint8)
+                self.assertEqual(tuple(prepared_scale.shape), (2, 2, 3, 2))
+                for expert in range(2):
+                    for n in range(3):
+                        for k in range(4):
+                            self.assertEqual(
+                                prepared_scale[expert, k // 2, n, k % 2],
+                                expected[expert, n, k],
+                            )
+
+    def test_preserves_packed_int8_bits_and_explicit_npu_format(self):
+        weight = torch.tensor([-128, -1, 0, 127], dtype=torch.int8).view(1, 2, 2)
+        scale = torch.ones(1, 2, 2, dtype=torch.uint8)
+
+        def format_cast(tensor, acl_format, **kwargs):
+            self.assertEqual(acl_format, 29)
+            self.assertEqual(tensor.dtype, torch.uint8)
+            self.assertEqual(kwargs["customize_dtype"], torch.float8_e4m3fn)
+            self.assertIsNotNone(kwargs["input_dtype"])
+            return tensor
+
+        with patch(
+            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            side_effect=format_cast,
+        ):
+            prepared_weight, _ = prepare_w4a8_mxfp_weight(weight, scale, npu_format=29)
+
+        self.assertTrue(
+            torch.equal(
+                prepared_weight,
+                torch.tensor([[[128, 0], [255, 127]]], dtype=torch.uint8),
+            )
+        )
+
+    def test_rejects_missing_fp4_support(self):
+        with (
+            patch(
+                "sglang.srt.hardware_backend.npu.quantization.moe_methods._get_float4_e2m1fn_x2_dtype",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(RuntimeError, "requires float4 support"),
+        ):
+            prepare_w4a8_mxfp_weight(
+                torch.zeros(1, 2, 32, dtype=torch.uint8),
+                torch.ones(1, 2, 2, dtype=torch.uint8),
+            )
+
+    def test_processes_both_experts_and_keeps_parameter_metadata(self):
+        layer = torch.nn.Module()
+        originals = {}
+        for prefix, n in (("w13", 3), ("w2", 2)):
+            weight = torch.nn.Parameter(
+                torch.full((2, n, 64), -1, dtype=torch.int8), requires_grad=False
+            )
+            scale = torch.nn.Parameter(
+                torch.tensor([125.0, 126.0, 127.0, 128.0]).repeat(2, n, 1),
+                requires_grad=False,
+            )
+            scale.weight_loader = object()
+            layer.register_parameter(f"{prefix}_weight", weight)
+            layer.register_parameter(f"{prefix}_weight_scale_inv", scale)
+            originals[prefix] = (weight, scale, scale.weight_loader)
+
+        with patch(
+            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            side_effect=lambda weight, **kwargs: weight,
+        ):
+            process_npu_fp4_expert_weights(layer)
+
+        for prefix, n in (("w13", 3), ("w2", 2)):
+            weight = getattr(layer, f"{prefix}_weight")
+            scale = getattr(layer, f"{prefix}_weight_scale_inv")
+            original_weight, original_scale, loader = originals[prefix]
+            self.assertIs(weight, original_weight)
+            self.assertIs(scale, original_scale)
+            self.assertIs(scale.weight_loader, loader)
+            self.assertTrue(
+                torch.equal(weight, torch.full((2, 64, n), 255, dtype=torch.uint8))
+            )
+            self.assertTrue(
+                torch.equal(
+                    scale,
+                    torch.tensor(
+                        [[[[125, 126]] * n, [[127, 128]] * n]] * 2, dtype=torch.uint8
+                    ),
+                )
+            )
 
 
 class TestMxfp4ScaleWeightLoader(unittest.TestCase):
@@ -729,7 +842,7 @@ class TestRunnerDelegation(unittest.TestCase):
         moe_runner.assert_called_once()
 
 
-class TestProcessWeightsAfterLoadingZeroScale(unittest.TestCase):
+class TestProcessWeightsAfterLoadingZeroScale(CustomTestCase):
     @staticmethod
     def _method():
         return NPUW4A8MXFP4FusedMoEMethod(prefix="test")
@@ -764,27 +877,62 @@ class TestProcessWeightsAfterLoadingZeroScale(unittest.TestCase):
     def test_keeps_low_latency_dispatch_in_mxfp8(self):
         layer = SimpleNamespace(
             w13_weight=torch.nn.Parameter(
-                torch.ones(1, 2, 32, dtype=torch.uint8), requires_grad=False
+                torch.arange(64, dtype=torch.uint8).view(1, 2, 32), requires_grad=False
             ),
             w13_weight_scale_inv=torch.nn.Parameter(
-                torch.ones(1, 2, 1, dtype=torch.uint8), requires_grad=False
+                torch.tensor([[[125, 126], [127, 128]]], dtype=torch.uint8),
+                requires_grad=False,
             ),
             w2_weight=torch.nn.Parameter(
-                torch.ones(1, 32, 1, dtype=torch.uint8), requires_grad=False
+                torch.full((1, 64, 32), 255, dtype=torch.uint8), requires_grad=False
             ),
             w2_weight_scale_inv=torch.nn.Parameter(
-                torch.ones(1, 32, 1, dtype=torch.uint8), requires_grad=False
+                torch.full((1, 64, 2), 127, dtype=torch.uint8), requires_grad=False
             ),
             dispatcher=MagicMock(),
         )
-        prepared_weight = torch.ones(1, 32, 2, dtype=torch.uint8)
-        prepared_scale = torch.ones(1, 1, 2, 2, dtype=torch.uint8)
+        original_scales = (layer.w13_weight_scale_inv, layer.w2_weight_scale_inv)
+
+        def format_cast(weight, acl_format, **kwargs):
+            self.assertEqual(acl_format, 29)  # ACL_FORMAT_FRACTAL_NZ
+            self.assertEqual(weight.dtype, torch.uint8)
+            self.assertIsNotNone(kwargs["input_dtype"])
+            return weight
 
         with patch(
-            "sglang.srt.hardware_backend.npu.quantization.fp4_moe_methods.prepare_w4a8_mxfp_weight",
-            return_value=(prepared_weight, prepared_scale),
+            "sglang.srt.hardware_backend.npu.quantization.moe_methods.npu_format_cast",
+            side_effect=format_cast,
         ):
             self._method().process_weights_after_loading(layer)
+
+        self.assertTrue(
+            torch.equal(
+                layer.w13_weight,
+                torch.arange(64, dtype=torch.uint8).view(1, 2, 32).transpose(1, 2),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                layer.w2_weight, torch.full((1, 32, 64), 255, dtype=torch.uint8)
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                layer.w13_weight_scale_inv,
+                torch.tensor([[[[125, 126], [127, 128]]]], dtype=torch.uint8),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                layer.w2_weight_scale_inv,
+                torch.full((1, 1, 64, 2), 127, dtype=torch.uint8),
+            )
+        )
+        for original, processed in zip(
+            original_scales, (layer.w13_weight_scale_inv, layer.w2_weight_scale_inv)
+        ):
+            self.assertIsNot(original, processed)
+            self.assertFalse(processed.requires_grad)
 
         layer.dispatcher.set_quant_config.assert_called_once_with(
             {
