@@ -1,0 +1,110 @@
+# NPU SQ/CQ: target/draft update/replay overlap A/B
+
+Diagnostic branch: `hanwlax/sglang:sq-cq`.
+Initial base: upstream `main` at
+`8fd181eaf4137b0ba52de8f3a34095f1933b3bc7` (2026-10-30).
+
+## Switch semantics
+
+All three variables default to `1`, preserving upstream overlap. They are read
+when each `NPUCudaGraphBackend` is constructed; restart the server after changing
+them. `ModelRunner.is_draft_worker` selects the role, including DSpark's draft
+decode runner. The target switch also controls ordinary non-speculative models.
+
+| Variable | Meaning |
+| --- | --- |
+| `SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP` | Global gate: `0` serializes both roles, regardless of role settings. |
+| `SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP` | Target role gate, effective when the global gate is `1`. |
+| `SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP` | Draft role gate, effective when the global gate is `1`. |
+
+Effective overlap is `global AND role`. Serial mode waits for the host
+`graph.update(...)` call to return before calling `graph.replay()`. Update still
+runs on the same device-bound executor. The preceding replay fence and the
+following event recording remain unchanged. Direct `replay()` without an input
+update is unaffected.
+
+This controls host graph update/replay overlap. Other stream and scheduler
+overlap settings retain their existing meaning.
+
+## Prepare run.sh
+
+Use the existing K3 + DSpark `run.sh` with its model paths, TP/DP, attention
+options and other launch arguments unchanged. Replace its hardcoded
+`export SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP=0` with:
+
+```bash
+export SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP=${SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP:-1}
+export SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP=${SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP:-1}
+export SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP=${SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP:-1}
+```
+
+Run from the checkout/container where `hanwlax:sq-cq` is installed. Check the
+import path and commit once before the comparisons:
+
+```bash
+git rev-parse HEAD
+python3 -c 'import sglang; print(sglang.__file__)'
+```
+
+Keep DSpark enabled for both role comparisons below. Stop the preceding server
+and wait for its workers to exit before starting the next case. Preserve the
+full startup/driver log for each case separately.
+
+## A: target overlap enabled; draft serialized
+
+```bash
+SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP=0 \
+bash ./run.sh
+```
+
+Expected initialization log settings: `role=target enabled=True` and
+`role=draft enabled=False`.
+
+## B: target serialized; draft overlap enabled
+
+```bash
+SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP=0 \
+SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+bash ./run.sh
+```
+
+Expected initialization log settings: `role=target enabled=False` and
+`role=draft enabled=True`.
+
+## Retained global A/B
+
+```bash
+# Both roles serialized. The global gate overrides both role gates.
+SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP=0 \
+SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+bash ./run.sh
+
+# Both roles overlap: upstream behavior.
+SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP=1 \
+bash ./run.sh
+```
+
+Initialization logs print the role, effective setting, global setting, role
+setting, runner class and device ID. For example:
+
+```text
+NPU graph update/replay overlap: role=draft enabled=False global=True role_enabled=False runner=NPUDecodeGraphRunner device=0
+```
+
+## Interpretation
+
+The reported incident establishes that global serialization avoids startup
+SQ/CQ failure in the user's K3 + DSpark configuration. The role comparisons
+above have not yet been executed on that NPU environment.
+
+If A succeeds and B fails, prioritize draft update/replay concurrency. If A
+fails and B succeeds, prioritize target concurrency. If both mixed cases fail
+while global serialization succeeds, retain cross-graph resource interaction
+and independent failures in both roles as hypotheses. These outcomes localize
+the trigger; they do not identify a specific CANN/driver root cause.

@@ -1159,6 +1159,11 @@ class Envs:
     # ===================================================================
     # Ascend NPU
     # ===================================================================
+    # Diagnostic controls for host-side NPUGraph.update/replay overlap.
+    # The global switch gates both roles; role switches default to enabled.
+    SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP = EnvBool(True)
+    SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP = EnvBool(True)
+    SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP = EnvBool(True)
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)
     # Requantize plain block-FP8 (fp32-scale) checkpoints to MXFP8 at load
     # time for arch35 (Atlas A5) Linear and MoE MXFP8 GEMMs. Disabled keeps

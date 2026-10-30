@@ -12,6 +12,7 @@ non-NPU hosts.
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager
 from functools import partial
@@ -24,6 +25,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
 )
+from sglang.srt.environ import envs
 from sglang.srt.model_executor.runner.shape_key import ShapeKey
 from sglang.srt.model_executor.runner_backend.base_cuda_graph_backend import (
     BaseCudaGraphBackend,
@@ -37,6 +39,9 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.runner.base_cuda_graph_runner import (
         BaseCudaGraphRunner,
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 class NPUCudaGraphBackend(BaseCudaGraphBackend):
@@ -63,6 +68,27 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         )
         self._enable_torch_compile = getattr(
             cuda_graph_runner, "enable_torch_compile", False
+        )
+        is_draft_worker = cuda_graph_runner.model_runner.is_draft_worker
+        global_overlap = envs.SGLANG_ENABLE_NPU_GRAPH_UPDATE_REPLAY_OVERLAP.get()
+        if is_draft_worker:
+            role_overlap = (
+                envs.SGLANG_ENABLE_NPU_DRAFT_GRAPH_UPDATE_REPLAY_OVERLAP.get()
+            )
+        else:
+            role_overlap = (
+                envs.SGLANG_ENABLE_NPU_TARGET_GRAPH_UPDATE_REPLAY_OVERLAP.get()
+            )
+        self._overlap_graph_update_replay = global_overlap and role_overlap
+        logger.info(
+            "NPU graph update/replay overlap: role=%s enabled=%s "
+            "global=%s role_enabled=%s runner=%s device=%s",
+            "draft" if is_draft_worker else "target",
+            self._overlap_graph_update_replay,
+            global_overlap,
+            role_overlap,
+            type(cuda_graph_runner).__name__,
+            self._device_id,
         )
         # Reuse one device-bound worker for graph input updates.
         self._update_executor = ThreadPoolExecutor(
@@ -163,8 +189,9 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
     ) -> Any:
         """Rebind seq_lens on the recorded NPU graph, then replay.
 
-        NPUGraph.update must complete before replay can consume the updated
-        KV lengths. Used when the model is not deepseek-nsa.
+        The overlap controls select concurrent host update/replay calls or
+        waiting for the update call to return before submitting replay.
+        The preceding replay fence is preserved in both modes.
 
         Two calling conventions:
         1. (legacy) seq_lens + attr_name + attr_type:
@@ -185,8 +212,11 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         update_future = self._update_executor.submit(
             graph.update, cpu_update_input=cpu_update_input
         )
+        if not self._overlap_graph_update_replay:
+            update_future.result()
         graph.replay()
-        update_future.result()
+        if self._overlap_graph_update_replay:
+            update_future.result()
 
         fence = self._device_module.Event()
         fence.record()
