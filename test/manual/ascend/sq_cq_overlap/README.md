@@ -6,21 +6,48 @@ Initial base: upstream `main` at
 
 ## Collect host, device and HAL logs with one command
 
-From the directory containing the existing `run.sh`, run:
+The default now preserves `run.sh` logging settings. From its directory, capture
+addresses first, using the configuration that reproduces the failure:
 
 ```bash
-python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py -- bash ./run.sh
+python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py --log-mode preserve -- bash ./run.sh
 # Forward the existing positional arguments if needed:
-python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py -- bash ./run.sh 10086 4 0 0
+python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py --log-mode preserve -- bash ./run.sh 10086 4 0 0
 ```
+
+Then collect a separate DEBUG comparison run, keeping the HAL probe enabled:
+
+```bash
+python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py --log-mode debug -- bash ./run.sh
+```
+
+These are different executions. Enabling DEBUG later cannot recover messages
+that were never recorded during the first failure. The HAL probe records API
+arguments/returns independently of the CANN log level. Its own I/O and the
+wrapper's terminal capture still add overhead, so preserving logging does not
+guarantee that a timing-sensitive failure will reproduce.
+
+Logging and HAL interception have independent controls:
+
+| Options | Behavior |
+| --- | --- |
+| `--log-mode preserve` (default) | Keep level, module filters, stdout/file mode, path and retention from `run.sh`; capture HAL arguments. |
+| `--log-mode debug` | Force DEBUG/1000/file output and capture HAL arguments (the previous default). |
+| `--log-mode preserve --no-hal-trace` | Keep original logging and collect without injecting the HAL probe. |
+| `--log-mode debug --no-hal-trace` | Collect DEBUG logs without injecting the HAL probe. |
+
+Only change one control at a time when testing which diagnostic suppresses a
+failure. `--no-hal-trace` requires no compiler, marks HAL capture as disabled,
+and does not count intentionally absent address records as missing coverage.
 
 The script compiles the HAL probe locally, launches `run.sh`, collects logs, and
 creates `logs/sqcq_full_*.tar.gz` plus a `.sha256` file. It requires Python 3.9+,
-a C compiler and 64-bit glibc Linux. Run with the same privileges/environment as
+a C compiler when tracing, and 64-bit glibc Linux. Run with the same privileges/environment as
 the reproduction. Reading `/root/ascend`, kernel logs and exporting device logs
 usually requires root; unavailable sources are recorded instead of discarded.
 
-The actual plain `python3 -m sglang.launch_server` invocation receives:
+With `--log-mode debug`, the actual plain `python3 -m sglang.launch_server`
+invocation receives:
 
 ```bash
 ASCEND_HOST_LOG_FILE_NUM=1000
@@ -32,7 +59,10 @@ ASCEND_PROCESS_LOG_PATH=<new capture directory>/cann
 
 `ASCEND_SLOG_PRINT_TO_STDOUT=0` enables file output; `1` would prevent CANN log
 files from being saved. A temporary `BASH_ENV` shell function enforces these
-settings even if `run.sh` changes them or clears `LD_PRELOAD`/`LD_AUDIT`.
+settings in debug mode even if `run.sh` changes them. In preserve mode all
+logging variables retain their values from `run.sh`, including module filters.
+When tracing, the guard restores its probe if the script clears
+`LD_PRELOAD`/`LD_AUDIT`.
 It keeps the original script, arguments, working directory and overlap flags.
 The known `run.sh` uses plain `python3`; an absolute Python executable,
 `env python3` or a replacement shell function can bypass this guard. An absent
@@ -56,10 +86,10 @@ The archive retains full file contents, without grep filtering or line limits:
 
 | Path | Evidence |
 | --- | --- |
-| `cann/` | This run's DEBUG CANN application logs in an independent directory. |
-| `host_logs/` | Existing `$HOME/ascend`, `/root/ascend`, `/var/log/npu/slog`, `/var/log/ascend_seclog`, inherited log path and system log files. These can include earlier runs. Source paths and copy failures are recorded. |
+| `cann/` | Independent DEBUG CANN logs in debug mode; this can be empty in preserve mode. |
+| `host_logs/` | Existing `$HOME/ascend`, `/root/ascend`, `/var/log/npu/slog`, `/var/log/ascend_seclog`, inherited log path, the serving process's actual log path and system log files. These can include earlier runs. Source paths and copy failures are recorded. |
 | `msnpureport/` | Device export, tool help and complete command output; also snapshots `/var/log/npu/report` when present. |
-| `hal_trace/` | Full terminal output, per-PID HAL entry/return JSONL, `aligned.tsv`, `summary.json`, and `problems.jsonl`. Alignment uses PID/device/stream. |
+| `hal_trace/` | Full terminal output; when tracing, also per-PID HAL entry/return JSONL, `aligned.tsv`, `summary.json`, and `problems.jsonl`. Alignment uses PID/device/stream. |
 | `metadata/` | Original `run.sh`, launch guard, actual serving Python/packages/import path and Git commit when available, driver/build/firmware information, `npu-smi`, `dmesg` and kernel journal. |
 | `collection.json`, `trigger.json` | Exact command, stage results, missing evidence and stopping reason when triggered. |
 
@@ -85,6 +115,9 @@ copy errors, unreadable kernel logs or missing HAL/CANN coverage still produce
 an archive and explicit `incomplete_reasons`. Inspect the recorded export
 output for per-device details. A 1000-file limit can still rotate: reaching it
 is flagged, and files already rotated before collection cannot be recovered.
+Coverage applies to the selected modes, which are saved in `collection.json`;
+preserve mode does not promise DEBUG logs or change the original retention.
+`metadata/python.jsonl` records the actual logging and overlap environment.
 No existing logs are deleted. Full DEBUG collection needs adequate free disk
 space; disk exhaustion or archive failure is reported, retaining the raw capture
 directory and any `.tar.gz.partial` for inspection.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command DEBUG + host/device/HAL capture, ending in a tar.gz archive.
+"""Host/device/HAL capture with independent logging and HAL probe controls.
 
 python3 collect_sqcq.py -- bash ./run.sh [port tp flashmla needs_cpu_seq_lens]
 """
@@ -121,7 +121,7 @@ def snapshot(source, destination, capture_root):
     return result
 
 
-def write_launch_guard(root, capture_env):
+def write_launch_guard(root, capture_env, *, log_mode, trace_hal):
     """Enforce settings at the known run.sh's plain `python3` invocation.
 
     The shell function survives PATH changes from CANN set_env and does not
@@ -137,6 +137,7 @@ def write_launch_guard(root, capture_env):
     assignments = " ".join(
         f"{key}={shlex.quote(value)}" for key, value in capture_env.items()
     )
+    unset_module = "-u ASCEND_MODULE_LOG_LEVEL" if log_mode == "debug" else ""
     helper = root / "metadata" / "python_metadata.py"
     helper.write_text("""import importlib.metadata as m
 import importlib.util
@@ -146,7 +147,7 @@ import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, os.getcwd())
-record = {"executable": sys.executable, "python": sys.version, "argv": sys.argv[2:], "packages": {}}
+record = {"executable": sys.executable, "python": sys.version, "cwd": os.getcwd(), "argv": sys.argv[2:], "packages": {}}
 record["logging_environment"] = {key: os.environ.get(key) for key in (
     "ASCEND_GLOBAL_LOG_LEVEL", "ASCEND_HOST_LOG_FILE_NUM",
     "ASCEND_SLOG_PRINT_TO_STDOUT", "ASCEND_PROCESS_LOG_PATH", "ASCEND_MODULE_LOG_LEVEL",
@@ -190,10 +191,8 @@ with open(sys.argv[1], "a") as out:
     metadata = root / "metadata" / "python.jsonl"
     helper_errors = root / "metadata" / "python_metadata_errors.log"
     probe = shlex.quote(str(root / "hal_trace" / "libsqcq_hal_trace.so"))
-    guard.write_text(
-        prefix
-        + f"""
-python3() {{
+    trace_setup = (
+        f"""
     local _sq_probe={probe}
     local _sq_preload="${{LD_PRELOAD:-}}" _sq_audit="${{LD_AUDIT:-}}"
     if [[ ":${{_sq_preload// /:}}:" != *":${{_sq_probe}}:"* ]]; then
@@ -202,11 +201,21 @@ python3() {{
     if [[ ":${{_sq_audit}}:" != *":${{_sq_probe}}:"* ]]; then
         _sq_audit="${{_sq_probe}}${{_sq_audit:+:${{_sq_audit}}}}"
     fi
+"""
+        if trace_hal
+        else ""
+    )
+    trace_env = 'LD_PRELOAD="$_sq_preload" LD_AUDIT="$_sq_audit"' if trace_hal else ""
+    guard.write_text(
+        prefix
+        + f"""
+python3() {{
+{trace_setup}
     if [[ "${{1-}}" == -m && "${{2-}}" == sglang.launch_server ]]; then
-        printf 'server_launch=1 DEBUG=0 FILE_NUM=1000 FILE_OUTPUT=0 python=%s\\n' "$(type -P python3)" >> {shlex.quote(str(marker))}
+        printf 'server_launch=1 log_mode={log_mode} hal_trace={int(trace_hal)} python=%s\\n' "$(type -P python3)" >> {shlex.quote(str(marker))}
     fi
-    command env -u ASCEND_MODULE_LOG_LEVEL {assignments} python3 {shlex.quote(str(helper))} {shlex.quote(str(metadata))} "$@" 2>> {shlex.quote(str(helper_errors))} || true
-    command env -u ASCEND_MODULE_LOG_LEVEL {assignments} LD_PRELOAD="$_sq_preload" LD_AUDIT="$_sq_audit" python3 "$@"
+    command env {unset_module} {assignments} python3 {shlex.quote(str(helper))} {shlex.quote(str(metadata))} "$@" 2>> {shlex.quote(str(helper_errors))} || true
+    command env {unset_module} {assignments} {trace_env} python3 "$@"
 }}
 """
     )
@@ -479,6 +488,17 @@ def main():
     )
     parser.add_argument("--post-error-seconds", type=float, default=3)
     parser.add_argument(
+        "--log-mode",
+        choices=("preserve", "debug"),
+        default="preserve",
+        help="preserve: keep run.sh logging settings (default); debug: force DEBUG/1000/file output",
+    )
+    parser.add_argument(
+        "--no-hal-trace",
+        action="store_true",
+        help="Collect logs without building or injecting the HAL probe",
+    )
+    parser.add_argument(
         "--no-auto-stop",
         action="store_true",
         help="Wait for exit/Ctrl+C instead of stopping on SQ/CQ failure",
@@ -519,20 +539,31 @@ def main():
         root = Path(tempfile.mkdtemp(prefix="sqcq_full_", dir=parent)).resolve()
     for child in ("metadata", "cann", "host_logs", "hal_trace/hal"):
         (root / child).mkdir(parents=True)
-    capture_env = {
-        "ASCEND_HOST_LOG_FILE_NUM": "1000",
-        "ASCEND_GLOBAL_LOG_LEVEL": "0",
-        "ASCEND_SLOG_PRINT_TO_STDOUT": "0",
-        "ASCEND_PROCESS_LOG_PATH": str(root / "cann"),
-    }
+    capture_env = (
+        {
+            "ASCEND_HOST_LOG_FILE_NUM": "1000",
+            "ASCEND_GLOBAL_LOG_LEVEL": "0",
+            "ASCEND_SLOG_PRINT_TO_STDOUT": "0",
+            "ASCEND_PROCESS_LOG_PATH": str(root / "cann"),
+        }
+        if args.log_mode == "debug"
+        else {}
+    )
+    trace_hal = not args.no_hal_trace
     library_path = root / "hal_trace" / "libsqcq_hal_trace.so"
-    enforced_env = {**capture_env, "SQ_CQ_TRACE_DIR": str(root / "hal_trace" / "hal")}
-    guard = write_launch_guard(root, enforced_env)
+    enforced_env = dict(capture_env)
+    if trace_hal:
+        enforced_env["SQ_CQ_TRACE_DIR"] = str(root / "hal_trace" / "hal")
+    guard = write_launch_guard(
+        root, enforced_env, log_mode=args.log_mode, trace_hal=trace_hal
+    )
     metadata = {
         "started_utc": datetime.now(timezone.utc).isoformat(),
         "cwd": str(Path.cwd()),
         "command": command,
         "requested_logging": capture_env,
+        "log_mode": args.log_mode,
+        "hal_trace_enabled": trace_hal,
         "collector_python": sys.executable,
         "stages": {},
         "free_bytes_at_start": shutil.disk_usage(root).free,
@@ -542,6 +573,7 @@ def main():
         if source.is_file() and source.suffix == ".sh":
             shutil.copy2(source, root / "metadata" / source.name)
     dump(root / "collection.json", metadata)
+    print(f"[collect] log_mode={args.log_mode}; hal_trace={trace_hal}", flush=True)
     monitor = ReproMonitor(
         root,
         timeout=args.run_timeout,
@@ -549,8 +581,9 @@ def main():
         auto_stop=not args.no_auto_stop,
     )
     try:
-        if ":" in str(library_path) or any(
-            char.isspace() for char in str(library_path)
+        if trace_hal and (
+            ":" in str(library_path)
+            or any(char.isspace() for char in str(library_path))
         ):
             raise RuntimeError(
                 "Capture path must not contain whitespace or ':' for LD_AUDIT"
@@ -559,13 +592,16 @@ def main():
         default_headers = Path("/usr/local/Ascend/driver/include")
         if headers is None and (default_headers / "ascend_hal_define.h").is_file():
             headers = default_headers
-        library, build = build_probe(root / "hal_trace", headers)
-        metadata["probe_build"] = build
+        library = None
+        if trace_hal:
+            library, build = build_probe(root / "hal_trace", headers)
+            metadata["probe_build"] = build
         extra_env = {
             **capture_env,
-            "ASCEND_MODULE_LOG_LEVEL": None,
             "BASH_ENV": str(guard),
         }
+        if args.log_mode == "debug":
+            extra_env["ASCEND_MODULE_LOG_LEVEL"] = None
         metadata["reproduction_return_code"] = run_command(
             command,
             root / "hal_trace",
@@ -595,13 +631,36 @@ def main():
     print("[collect] reproduction stopped; collecting retained logs", flush=True)
     time.sleep(2)
     stages = metadata["stages"]
-    try:
-        stages["hal"] = analyze(root / "hal_trace")
-        stages["hal"].pop("rows", None)
-    except (OSError, ValueError) as error:
-        stages["hal"] = {"error": str(error)}
+    stages["hal"] = {"status": "disabled"}
+    if trace_hal:
+        try:
+            stages["hal"] = analyze(root / "hal_trace")
+            stages["hal"].pop("rows", None)
+        except (OSError, ValueError) as error:
+            stages["hal"] = {"error": str(error)}
+    extra_roots = list(args.host_log_root)
+    python_metadata = root / "metadata" / "python.jsonl"
+    serving = []
+    if python_metadata.is_file():
+        for line in python_metadata.read_text().splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("argv", [])[:2] == ["-m", "sglang.launch_server"]:
+                serving.append(record)
+                path = record.get("logging_environment", {}).get(
+                    "ASCEND_PROCESS_LOG_PATH"
+                )
+                if path:
+                    source = Path(path).expanduser()
+                    if not source.is_absolute():
+                        source = Path(record["cwd"]) / source
+                    if source.resolve() != root / "cann":
+                        extra_roots.append(source)
+    stages["serving_environment_recorded"] = bool(serving)
     for name, collect in [
-        ("host_logs", lambda: collect_host(root, args.host_log_root)),
+        ("host_logs", lambda: collect_host(root, extra_roots)),
         (
             "msnpureport",
             lambda: export_device(
@@ -643,6 +702,8 @@ def main():
         reasons.append(
             "logging settings were not verified at python3 -m sglang.launch_server"
         )
+    if not serving:
+        reasons.append("serving Python/environment metadata was not captured")
     if stages["msnpureport"]["status"] != "ok":
         reasons.append("msnpureport: " + stages["msnpureport"]["status"])
     if (
@@ -650,7 +711,7 @@ def main():
         == "partial"
     ):
         reasons.append("some retained msnpureport files could not be copied")
-    if not all(
+    if trace_hal and not all(
         hal.get("events", {}).get(event, 0) > 0
         for event in ("switch_begin", "fill_begin")
     ):
@@ -669,7 +730,7 @@ def main():
         reasons.append(
             "a CANN log directory reached the 1000-file limit; earlier rotation cannot be excluded"
         )
-    if not any(
+    if args.log_mode == "debug" and not any(
         path.is_file() and path.stat().st_size for path in (root / "cann").rglob("*")
     ):
         reasons.append(
@@ -682,7 +743,8 @@ def main():
     dump(root / "collection.json", metadata)
     (root / "README.txt").write_text(
         "collection.json: per-stage results; collection_complete is coverage, not model success.\n"
-        "cann/: this run's DEBUG CANN host/device application logs, FILE_NUM=1000.\n"
+        f"log_mode={args.log_mode}; hal_trace={trace_hal}; coverage checks apply to requested channels.\n"
+        "cann/: forced DEBUG logs in debug mode; preserve mode uses run.sh paths/terminal output.\n"
         "host_logs/: retained root/user Ascend and system logs; sources/errors are in collection.json.\n"
         "msnpureport/: device export and command output.\n"
         "hal_trace/: terminal.log, per-PID HAL calls, aligned.tsv and problems.jsonl.\n"

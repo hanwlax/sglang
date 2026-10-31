@@ -45,10 +45,16 @@ from pathlib import Path
 import signal
 import sys
 import time
-assert os.environ['ASCEND_GLOBAL_LOG_LEVEL']=='0'
-assert os.environ['ASCEND_HOST_LOG_FILE_NUM']=='1000'
-assert os.environ['ASCEND_SLOG_PRINT_TO_STDOUT']=='0'
-assert 'ASCEND_MODULE_LOG_LEVEL' not in os.environ
+if os.environ['FAKE_LOG_MODE']=='debug':
+    assert os.environ['ASCEND_GLOBAL_LOG_LEVEL']=='0'
+    assert os.environ['ASCEND_HOST_LOG_FILE_NUM']=='1000'
+    assert os.environ['ASCEND_SLOG_PRINT_TO_STDOUT']=='0'
+    assert 'ASCEND_MODULE_LOG_LEVEL' not in os.environ
+else:
+    assert os.environ['ASCEND_GLOBAL_LOG_LEVEL']=='3'
+    assert os.environ['ASCEND_HOST_LOG_FILE_NUM']=='2'
+    assert os.environ['ASCEND_SLOG_PRINT_TO_STDOUT']=='1'
+    assert os.environ['ASCEND_MODULE_LOG_LEVEL']=='RUNTIME=3:DRV=3'
 assert sys.argv[1:]==['10086','4','0','0']
 if os.environ.get('FAKE_ORPHAN')=='1':
     if os.fork()==0:
@@ -74,6 +80,10 @@ assert h.halStreamTaskFill(0,22,info.memory,0xabc0,127)==0
 info.memory=0x1208bfe08000
 assert h.halSqSwitchStreamBatch(0,c.byref(info),1)==0
 assert h.halStreamTaskFill(0,22,info.memory,0xabc0,127)==14
+if os.environ['FAKE_TRACE']=='0':
+    assert 'libsqcq_hal_trace.so' not in os.environ.get('LD_PRELOAD','')
+    assert 'libsqcq_hal_trace.so' not in os.environ.get('LD_AUDIT','')
+    print('[ERROR] RUNTIME: Fill task exceed stream queue',flush=True)
 # Do not print a failure: auto-stop must detect the native HAL record.
 print('fake model remains alive after HAL failure',flush=True)
 time.sleep(60)
@@ -108,14 +118,23 @@ def isolated_snapshot(source,destination,capture_root):
         return {{'source':str(source),'status':'missing','files':0,'bytes':0,'errors':[]}}
     return original_snapshot(source,destination,capture_root)
 c.snapshot=isolated_snapshot
-c.collect_host=lambda capture,extra:[original_snapshot(Path({str(root / "old_host")!r}),capture/'host_logs'/'fixture',capture)]
+c.collect_host=lambda capture,extra:[original_snapshot(Path({str(root / "old_host")!r}),capture/'host_logs'/'fixture',capture)]+[original_snapshot(source,capture/'host_logs'/'discovered'/str(index),capture) for index,source in enumerate(extra)]
 c.collect_metadata=lambda capture:{{'dmesg':{{'status':'ok','note':'fake boundary; no real kernel read'}}}}
 sys.exit(c.main())
 """)
     return wrapper, tool
 
 
-def check_case(root, fake, fail_export, timeout_export=False, orphan=False):
+def check_case(
+    root,
+    fake,
+    fail_export,
+    timeout_export=False,
+    orphan=False,
+    *,
+    log_mode="debug",
+    trace_hal=True,
+):
     wrapper, tool = make_case(root)
     output = root / "capture"
     environment = os.environ.copy()
@@ -124,11 +143,17 @@ def check_case(root, fake, fail_export, timeout_export=False, orphan=False):
         FAKE_EXPORT_FAIL="1" if fail_export else "0",
         FAKE_EXPORT_HANG="1" if timeout_export else "0",
         FAKE_ORPHAN="1" if orphan else "0",
+        FAKE_LOG_MODE=log_mode or "preserve",
+        FAKE_TRACE="1" if trace_hal else "0",
     )
+    if not trace_hal:
+        environment["CC"] = "/bin/false"  # No compiler is needed without the probe.
     result = subprocess.run(
         [
             sys.executable,
             str(wrapper),
+            *(["--log-mode", log_mode] if log_mode else []),
+            *([] if trace_hal else ["--no-hal-trace"]),
             "--output",
             str(output),
             "--post-error-seconds",
@@ -164,6 +189,9 @@ def check_case(root, fake, fail_export, timeout_export=False, orphan=False):
     )
     metadata = json.loads((output / "collection.json").read_text())
     assert metadata["collection_complete"] is (not partial), metadata
+    debug = log_mode == "debug"
+    assert metadata["log_mode"] == (log_mode or "preserve")
+    assert metadata["hal_trace_enabled"] is trace_hal
     if orphan:
         pid = int((root / "orphan.pid").read_text())
         process_stat = Path(f"/proc/{pid}/stat")
@@ -175,29 +203,41 @@ def check_case(root, fake, fail_export, timeout_export=False, orphan=False):
     )
     assert serving_python["sglang_origin"] == str(root / "sglang" / "__init__.py")
     assert serving_python["argv"][:2] == ["-m", "sglang.launch_server"]
-    assert serving_python["logging_environment"]["ASCEND_GLOBAL_LOG_LEVEL"] == "0"
-    assert serving_python["logging_environment"]["ASCEND_HOST_LOG_FILE_NUM"] == "1000"
-    assert serving_python["logging_environment"]["ASCEND_MODULE_LOG_LEVEL"] is None
-    assert metadata["requested_logging"]["ASCEND_HOST_LOG_FILE_NUM"] == "1000"
-    assert not (root / "wrong-log-path").exists()
+    settings = serving_python["logging_environment"]
+    assert settings["ASCEND_GLOBAL_LOG_LEVEL"] == ("0" if debug else "3")
+    assert settings["ASCEND_HOST_LOG_FILE_NUM"] == ("1000" if debug else "2")
+    assert settings["ASCEND_MODULE_LOG_LEVEL"] == (None if debug else "RUNTIME=3:DRV=3")
+    assert (root / "wrong-log-path").exists() is (not debug)
+    if debug:
+        assert metadata["requested_logging"]["ASCEND_HOST_LOG_FILE_NUM"] == "1000"
+    else:
+        assert metadata["requested_logging"] == {}
     assert (output / "metadata" / "run.sh").read_bytes() == (
         root / "run.sh"
     ).read_bytes()
+    trigger = json.loads((output / "trigger.json").read_text())["reason"]
     assert (
-        json.loads((output / "trigger.json").read_text())["reason"]
-        == "nonzero HAL Fill return"
+        trigger == "nonzero HAL Fill return"
+        if trace_hal
+        else "Fill task exceed stream queue" in trigger
     )
-    assert "first line retained" in next((output / "cann").rglob("*.log")).read_text()
+    log_root = output / "cann" if debug else output / "host_logs" / "discovered"
+    assert "first line retained" in next(log_root.rglob("*.log")).read_text()
     assert (
         output / "host_logs" / "fixture" / "debug" / "plog" / "retained.log"
     ).is_file()
     assert (
         output / "msnpureport" / "received_args.txt"
     ).read_text().strip() == "-f --docker"
-    hal = json.loads((output / "hal_trace" / "summary.json").read_text())
-    assert any(
-        row["fill_ret"] == 14 and row["relation"] == "EQUAL" for row in hal["rows"]
-    )
+    if trace_hal:
+        hal = json.loads((output / "hal_trace" / "summary.json").read_text())
+        assert any(
+            row["fill_ret"] == 14 and row["relation"] == "EQUAL" for row in hal["rows"]
+        )
+    else:
+        assert metadata["stages"]["hal"]["status"] == "disabled"
+        assert not (output / "hal_trace" / "libsqcq_hal_trace.so").exists()
+        assert not list((output / "hal_trace" / "hal").glob("*.jsonl"))
     archive = Path(str(output) + ".tar.gz")
     assert archive.is_file()
     assert (
@@ -206,7 +246,9 @@ def check_case(root, fake, fail_export, timeout_export=False, orphan=False):
     )
     with tarfile.open(archive) as bundle:
         names = bundle.getnames()
-        assert any(name.endswith("hal_trace/aligned.tsv") for name in names)
+        assert (
+            any(name.endswith("hal_trace/aligned.tsv") for name in names) is trace_hal
+        )
         assert any(name.endswith("collection.json") for name in names)
         if partial:
             assert metadata["stages"]["msnpureport"]["status"] == "failed"
@@ -223,7 +265,7 @@ def check_case(root, fake, fail_export, timeout_export=False, orphan=False):
         "PASS collector:",
         "export failure/timeout still packaged, marked partial"
         if partial
-        else "DEBUG/1000 enforced despite run.sh overrides; auto-stop, all sources and archive verified",
+        else f"log_mode={log_mode or 'preserve'} hal_trace={trace_hal}; auto-stop, settings, sources and archive verified",
     )
 
 
@@ -341,6 +383,15 @@ def main():
         check_case(root / "failed_export", fake, True)
         check_case(root / "timed_out_export", fake, False, True)
         check_case(root / "orphan_worker", fake, False, orphan=True)
+        check_case(root / "default_preserve", fake, False, log_mode=None)
+        check_case(root / "debug_without_probe", fake, False, trace_hal=False)
+        check_case(
+            root / "preserve_without_probe",
+            fake,
+            False,
+            log_mode="preserve",
+            trace_hal=False,
+        )
         check_snapshot(root)
         check_error_detection(root)
         check_export_help(root / "export_help")

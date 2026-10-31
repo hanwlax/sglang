@@ -255,13 +255,14 @@ def run_command(command, directory, library, *, extra_env=None, on_start=None):
             environment.pop(key, None)
         else:
             environment[key] = str(value)
-    environment["SQ_CQ_TRACE_DIR"] = str(directory / "hal")
-    environment["LD_PRELOAD"] = str(library) + (
-        ":" + environment["LD_PRELOAD"] if environment.get("LD_PRELOAD") else ""
-    )
-    environment["LD_AUDIT"] = str(library) + (
-        ":" + environment["LD_AUDIT"] if environment.get("LD_AUDIT") else ""
-    )
+    if library is not None:
+        environment["SQ_CQ_TRACE_DIR"] = str(directory / "hal")
+        environment["LD_PRELOAD"] = str(library) + (
+            ":" + environment["LD_PRELOAD"] if environment.get("LD_PRELOAD") else ""
+        )
+        environment["LD_AUDIT"] = str(library) + (
+            ":" + environment["LD_AUDIT"] if environment.get("LD_AUDIT") else ""
+        )
     process = None
     pending_signals = []
 
