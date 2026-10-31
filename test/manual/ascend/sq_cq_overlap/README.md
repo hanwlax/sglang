@@ -4,6 +4,93 @@ Diagnostic branch: `hanwlax/sglang:sq-cq`.
 Initial base: upstream `main` at
 `8fd181eaf4137b0ba52de8f3a34095f1933b3bc7` (2026-10-30).
 
+## Collect host, device and HAL logs with one command
+
+From the directory containing the existing `run.sh`, run:
+
+```bash
+python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py -- bash ./run.sh
+# Forward the existing positional arguments if needed:
+python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py -- bash ./run.sh 10086 4 0 0
+```
+
+The script compiles the HAL probe locally, launches `run.sh`, collects logs, and
+creates `logs/sqcq_full_*.tar.gz` plus a `.sha256` file. It requires Python 3.9+,
+a C compiler and 64-bit glibc Linux. Run with the same privileges/environment as
+the reproduction. Reading `/root/ascend`, kernel logs and exporting device logs
+usually requires root; unavailable sources are recorded instead of discarded.
+
+The actual plain `python3 -m sglang.launch_server` invocation receives:
+
+```bash
+ASCEND_HOST_LOG_FILE_NUM=1000
+ASCEND_GLOBAL_LOG_LEVEL=0
+ASCEND_SLOG_PRINT_TO_STDOUT=0
+ASCEND_PROCESS_LOG_PATH=<new capture directory>/cann
+# ASCEND_MODULE_LOG_LEVEL is unset to prevent old INFO overrides.
+```
+
+`ASCEND_SLOG_PRINT_TO_STDOUT=0` enables file output; `1` would prevent CANN log
+files from being saved. A temporary `BASH_ENV` shell function enforces these
+settings even if `run.sh` changes them or clears `LD_PRELOAD`/`LD_AUDIT`.
+It keeps the original script, arguments, working directory and overlap flags.
+The known `run.sh` uses plain `python3`; an absolute Python executable,
+`env python3` or a replacement shell function can bypass this guard. An absent
+server launch marker is reported as incomplete coverage.
+
+Default stopping behavior: a nonzero `halStreamTaskFill` return, an actual
+SQ/CQ ERROR line, or a scheduler exception triggers a three-second tail capture
+and then stops only the process group launched by this script. INFO format
+registration and `error=0` do not trigger it. The fallback reproduction timeout
+is 900 seconds. Use `--run-timeout 1800` for a longer startup. Ctrl+C stops the
+reproduction and continues collection; further Ctrl+C during export/packaging
+does not discard the evidence. To stop the reproduction manually without an
+error/timeout trigger:
+
+```bash
+python3 /path/to/sglang/test/manual/ascend/sq_cq_overlap/collect_sqcq.py \
+  --no-auto-stop --run-timeout 0 -- bash ./run.sh
+```
+
+The archive retains full file contents, without grep filtering or line limits:
+
+| Path | Evidence |
+| --- | --- |
+| `cann/` | This run's DEBUG CANN application logs in an independent directory. |
+| `host_logs/` | Existing `$HOME/ascend`, `/root/ascend`, `/var/log/npu/slog`, `/var/log/ascend_seclog`, inherited log path and system log files. These can include earlier runs. Source paths and copy failures are recorded. |
+| `msnpureport/` | Device export, tool help and complete command output; also snapshots `/var/log/npu/report` when present. |
+| `hal_trace/` | Full terminal output, per-PID HAL entry/return JSONL, `aligned.tsv`, `summary.json`, and `problems.jsonl`. Alignment uses PID/device/stream. |
+| `metadata/` | Original `run.sh`, launch guard, actual serving Python/packages/import path and Git commit when available, driver/build/firmware information, `npu-smi`, `dmesg` and kernel journal. |
+| `collection.json`, `trigger.json` | Exact command, stage results, missing evidence and stopping reason when triggered. |
+
+`msnpureport` is located from PATH or
+`/usr/local/Ascend/driver/tools/msnpureport`. Override with
+`--msnpureport /path/to/msnpureport`. The script uses the supported `-f` export,
+or `report -t 0` if help only advertises the newer interface. Containers detected
+via `/.dockerenv` or `/run/.containerenv` receive `--docker` if supported;
+`--container yes` forces it when detection is insufficient. The default export
+timeout is 180 seconds (`--msnpureport-timeout` overrides it). This command
+exports existing device logs; it does not change persistent device log levels.
+Add custom host locations with repeatable `--host-log-root /path`.
+
+The collector returns `0` when its coverage checks pass and `2` for incomplete
+collection. The model's return code is separate in `collection.json`; a model
+failure is expected in this reproduction. Missing tools, export failure/timeout,
+copy errors, unreadable kernel logs or missing HAL/CANN coverage still produce
+an archive and explicit `incomplete_reasons`. Inspect the recorded export
+output for per-device details. A 1000-file limit can still rotate: reaching it
+is flagged, and files already rotated before collection cannot be recovered.
+No existing logs are deleted. Full DEBUG collection needs adequate free disk
+space; disk exhaustion or archive failure is reported, retaining the raw capture
+directory and any `.tar.gz.partial` for inspection.
+
+CPU-only self-checks (fake HAL/tools and private log fixtures, no NPU required):
+
+```bash
+python3 test/manual/ascend/sq_cq_overlap/self_test_collect_sqcq.py
+python3 test/manual/ascend/sq_cq_overlap/trace_hal_stream_mem.py --self-test
+```
+
 ## Switch semantics
 
 All three variables default to `1`, preserving upstream overlap. They are read

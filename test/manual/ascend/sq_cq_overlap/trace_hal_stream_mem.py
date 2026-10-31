@@ -248,8 +248,13 @@ def analyze(directory, **filters):
     return summary
 
 
-def run_command(command, directory, library):
+def run_command(command, directory, library, *, extra_env=None, on_start=None):
     environment = os.environ.copy()
+    for key, value in (extra_env or {}).items():
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = str(value)
     environment["SQ_CQ_TRACE_DIR"] = str(directory / "hal")
     environment["LD_PRELOAD"] = str(library) + (
         ":" + environment["LD_PRELOAD"] if environment.get("LD_PRELOAD") else ""
@@ -287,6 +292,8 @@ def run_command(command, directory, library):
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            if on_start is not None:
+                on_start(process)
             for signum in pending_signals:
                 forward(signum, None)
             while chunk := process.stdout.read1(65536):
