@@ -395,10 +395,9 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
                     # Prefer the live CPU mirror to avoid a blocking D2H copy;
                     # fall back to device lengths when the mirror is unavailable.
                     if forward_batch.seq_lens_cpu is not None:
-                        seq_lens_cpu = (
-                            forward_batch.seq_lens_cpu[: self.raw_bs]
-                            + self.captured_req_width
-                        )
+                        seq_lens_cpu = forward_batch.seq_lens_cpu[: self.raw_bs]
+                        if not self.model_runner.spec_algorithm.is_dflash_family():
+                            seq_lens_cpu = seq_lens_cpu + self.captured_req_width
                     else:
                         seq_lens_cpu = (
                             forward_batch.seq_lens.cpu() + self.captured_req_width
