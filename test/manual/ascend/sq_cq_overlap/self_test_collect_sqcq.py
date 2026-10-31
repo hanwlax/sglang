@@ -13,8 +13,9 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
-from collect_sqcq import ReproMonitor, snapshot
+from collect_sqcq import ReproMonitor, export_device, snapshot
 
 HERE = Path(__file__).resolve().parent
 
@@ -267,6 +268,58 @@ def check_error_detection(root):
     print("PASS detection: INFO registration/error=0 ignored; actual ERROR caught")
 
 
+def check_export_help(root):
+    loader_message = (
+        "/usr/local/Ascend/driver/tools/msnpureport: /lib/aarch64-linux-gnu/libc.so.6: "
+        "version `GLIBC_2.38' not found (required by msnpureport)"
+    )
+    for name, help_text, status, expected in (
+        ("legacy", "Usage: msnpureport -f, --force", 0, "-f"),
+        ("short_legacy", "Usage: msnpureport\n-f\nexport report", 0, "-f"),
+        (
+            "modern",
+            "Usage: msnpureport\nCommands:\n report [options]",
+            0,
+            "report -t 0",
+        ),
+        ("basename_only", "Usage: msnpureport [options]", 0, "-f"),
+        ("failed_help", "msnpureport: failed to generate report help", 1, "-f"),
+        ("loader_failure", loader_message, 127, None),
+    ):
+        capture = root / name
+        capture.mkdir(parents=True)
+        tool = capture / "fake_msnpureport"
+        tool.write_text(f"""#!/bin/bash
+if [[ "${{1-}}" == --help ]]; then
+    printf '%s\\n' {shlex.quote(help_text)}
+    exit {status}
+fi
+printf '%s\\n' "$*" > received_args.txt
+mkdir -p report_fixture
+echo 'exported device data' > report_fixture/device.log
+""")
+        tool.chmod(0o755)
+        with patch(
+            "collect_sqcq.snapshot",
+            return_value={"status": "missing", "source": "fake boundary"},
+        ):
+            result = export_device(capture, str(tool), container="no", timeout=2)
+        received = capture / "msnpureport" / "received_args.txt"
+        if expected is None:
+            assert result["status"] == "failed", result
+            assert result["export_attempted"] is False
+            assert not received.exists()
+            assert (
+                loader_message in (capture / "msnpureport" / "command.log").read_text()
+            )
+        else:
+            assert result["status"] == "ok", result
+            assert received.read_text().strip() == expected
+    print(
+        "PASS export detection: valid legacy/modern help, basename, failed help and loader error"
+    )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="sqcq-collect-self-test-") as temporary:
         root = Path(temporary)
@@ -290,6 +343,7 @@ def main():
         check_case(root / "orphan_worker", fake, False, orphan=True)
         check_snapshot(root)
         check_error_detection(root)
+        check_export_help(root / "export_help")
     print(
         "All collector checks passed with fake tools; no real NPU or host logs were read."
     )

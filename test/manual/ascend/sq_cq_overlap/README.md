@@ -72,6 +72,11 @@ via `/.dockerenv` or `/run/.containerenv` receive `--docker` if supported;
 timeout is 180 seconds (`--msnpureport-timeout` overrides it). This command
 exports existing device logs; it does not change persistent device log levels.
 Add custom host locations with repeatable `--host-log-root /path`.
+Only successful help output is used to detect the newer CLI. Loader errors
+such as `GLIBC_2.38 not found` are retained and mark device export incomplete;
+changing command-line options cannot fix a binary that cannot start. Export
+device logs on a host with a compatible runtime, or pass a compatible exporter
+with `--msnpureport`. The host/HAL capture remains available in either case.
 
 The collector returns `0` when its coverage checks pass and `2` for incomplete
 collection. The model's return code is separate in `collection.json`; a model

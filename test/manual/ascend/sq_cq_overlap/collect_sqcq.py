@@ -386,22 +386,40 @@ def export_device(root, executable, *, container, timeout):
     tool = str(Path(shutil.which(tool) or tool).resolve())
     help_status = command_log([tool, "--help"], directory / "help.txt", cwd=directory)
     help_text = (directory / "help.txt").read_text(errors="replace")
+    valid_help = help_status["status"] == "ok"
+    loader_error = not valid_help and re.search(
+        r"version [`']GLIBC_[^'`]+['`] not found|error while loading shared libraries:",
+        help_text,
+    )
     flags = ["-f"]
     if (
-        "--force" not in help_text
-        and not re.search(r"\s-f(?:[ ,\t]|$)", help_text)
-        and "report" in help_text
+        valid_help
+        and "--force" not in help_text
+        and not re.search(r"(?:^|\s)-f(?:[\s,]|$)", help_text)
+        and re.search(r"\breport\b", help_text)
     ):
         flags = ["report", "-t", "0"]
     docker = Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
     if container == "yes" or (
-        container == "auto" and docker and "--docker" in help_text
+        container == "auto" and docker and valid_help and "--docker" in help_text
     ):
         flags.append("--docker")
-    print(f"[collect] exporting device logs: {shlex.join([tool] + flags)}", flush=True)
-    result = command_log(
-        [tool] + flags, directory / "command.log", cwd=directory, timeout=timeout
-    )
+    if loader_error:
+        reason = (
+            "msnpureport cannot start with this runtime/shared-library environment; "
+            "export on a compatible host or supply a compatible --msnpureport"
+        )
+        result = {"status": "failed", "export_attempted": False, "reason": reason}
+        (directory / "command.log").write_text(help_text + "\n" + reason + "\n")
+        print("[collect] " + reason, flush=True)
+    else:
+        print(
+            f"[collect] exporting device logs: {shlex.join([tool] + flags)}", flush=True
+        )
+        result = command_log(
+            [tool] + flags, directory / "command.log", cwd=directory, timeout=timeout
+        )
+        result["export_attempted"] = True
     result["help"] = help_status
     # Some HDK releases write here rather than the command's working directory.
     result["default_report_snapshot"] = snapshot(
