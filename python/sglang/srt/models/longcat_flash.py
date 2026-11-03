@@ -811,6 +811,16 @@ class LongcatFlashForCausalLM(nn.Module):
                                     weight_block_size,
                                     torch.bfloat16,
                                 )
+                        elif _is_npu:
+                            # NPU MLA BMMs consume unscaled BF16 weights. Dequantize
+                            # the derived weights without a tensor-FP8 round trip;
+                            # kv_b_proj itself retains its block-FP8 parameters.
+                            w = block_quant_dequant(
+                                weight,
+                                weight_scale,
+                                weight_block_size,
+                                torch.bfloat16,
+                            )
                         else:
                             w, scale = block_quant_to_tensor_quant(
                                 weight, weight_scale, weight_block_size
