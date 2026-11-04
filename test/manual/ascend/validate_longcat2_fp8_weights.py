@@ -16,7 +16,7 @@ import torch_npu
 from safetensors import safe_open
 
 
-def load_shard(model_path, layer, attention, tp_size, tp_rank):
+def load_shard(model_path, layer, attention, tp_size, tp_rank, mtp=False):
     config = json.loads((model_path / "config.json").read_text())
     quant = config["quantization_config"]
     if quant["quant_method"] != "fp8" or quant["weight_block_size"] != [128, 128]:
@@ -31,7 +31,11 @@ def load_shard(model_path, layer, attention, tp_size, tp_rank):
     weight_map = json.loads((model_path / "model.safetensors.index.json").read_text())[
         "weight_map"
     ]
-    prefix = f"model.layers.{layer}.self_attn.{attention}.kv_b_proj"
+    prefix = (
+        f"model.mtp.layers.{layer}.self_attn.kv_b_proj"
+        if mtp
+        else f"model.layers.{layer}.self_attn.{attention}.kv_b_proj"
+    )
     tensors = []
     for suffix, first, last in (
         ("weight", start, end),
@@ -67,6 +71,9 @@ def main():
     parser.add_argument("--tp-rank", type=int, default=0)
     parser.add_argument("--layer", type=int, default=0)
     parser.add_argument("--attention", type=int, choices=(0, 1), default=0)
+    parser.add_argument(
+        "--mtp", action="store_true", help="Check the MTP decoder weights"
+    )
     parser.add_argument("--check-empty-rank", action="store_true")
     args = parser.parse_args()
     # Select native G-B before the quantization methods inspect the environment.
@@ -84,6 +91,9 @@ def main():
     )
     from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
     from sglang.srt.models.longcat_flash import LongcatFlashForCausalLM
+    from sglang.srt.models.longcat_flash_nextn import LongcatFlashForCausalLMNextN
+
+    model_class = LongcatFlashForCausalLMNextN if args.mtp else LongcatFlashForCausalLM
 
     print(
         json.dumps(
@@ -91,7 +101,8 @@ def main():
                 "torch": torch.__version__,
                 "torch_npu": torch_npu.__version__,
                 "device": torch.npu.get_device_name(args.device),
-                "model_source": inspect.getfile(LongcatFlashForCausalLM),
+                "model_source": inspect.getfile(model_class),
+                "mtp": args.mtp,
                 "model_path": str(args.model_path),
                 "tp_size": args.tp_size,
                 "tp_rank": args.tp_rank,
@@ -100,7 +111,12 @@ def main():
         flush=True,
     )
     config, weight, scale = load_shard(
-        args.model_path, args.layer, args.attention, args.tp_size, args.tp_rank
+        args.model_path,
+        args.layer,
+        args.attention,
+        args.tp_size,
+        args.tp_rank,
+        args.mtp,
     )
     if weight.dtype != torch.float8_e4m3fn or scale.dtype != torch.float32:
         raise TypeError(f"Expected E4M3 + FP32, got {weight.dtype}, {scale.dtype}")
@@ -118,16 +134,20 @@ def main():
             w_vc=None,
             w_scale=None,
         )
-        for _ in range(2)
+        for _ in range(1 if args.mtp else 2)
     ]
     owner = SimpleNamespace(
         config=SimpleNamespace(
             num_hidden_layers=1, mla_scale_q_lora=False, mla_scale_kv_lora=False
         ),
         quant_config=quant_config,
-        model=SimpleNamespace(layers=[SimpleNamespace(self_attn=attentions)]),
+        model=(
+            SimpleNamespace(decoder=SimpleNamespace(self_attn=attentions[0]))
+            if args.mtp
+            else SimpleNamespace(layers=[SimpleNamespace(self_attn=attentions)])
+        ),
     )
-    LongcatFlashForCausalLM.post_load_weights(owner)
+    model_class.post_load_weights(owner)
     rows, cols = weight.shape
     row_ids, col_ids = torch.arange(rows) // 128, torch.arange(cols) // 128
     dequant = weight.float() * scale[row_ids[:, None], col_ids[None, :]]
