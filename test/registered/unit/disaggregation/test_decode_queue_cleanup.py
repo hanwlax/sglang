@@ -863,13 +863,23 @@ class TestAdmissionOverlap(CustomTestCase):
                 forward_stream_ctx=forward_context(),
             )
             batch.process_prebuilt.side_effect = lambda _: calls.append("seed")
+            scheduler.ngram_embedding_manager.prepare_for_forward.side_effect = (
+                lambda *args, **kwargs: calls.append("seed_history")
+            )
             result = SchedulerDisaggregationDecodeMixin.get_new_prebuilt_batch(
                 scheduler, object()
             )
             self.assertIs(result, batch)
             if nonblocking:
                 self.assertEqual(
-                    calls, ["verify", "enter_forward", "seed", "leave_forward"]
+                    calls,
+                    [
+                        "verify",
+                        "enter_forward",
+                        "seed_history",
+                        "seed",
+                        "leave_forward",
+                    ],
                 )
                 scheduler.schedule_stream.wait_stream.assert_not_called()
                 scheduler.forward_stream.wait_stream.assert_called_once_with(
@@ -882,7 +892,7 @@ class TestAdmissionOverlap(CustomTestCase):
                     scheduler.forward_stream
                 )
             else:
-                self.assertEqual(calls, ["verify", "seed"])
+                self.assertEqual(calls, ["verify", "seed_history", "seed"])
                 scheduler.schedule_stream.wait_stream.assert_called_once_with(
                     scheduler.forward_stream
                 )

@@ -199,7 +199,9 @@ class NgramEmbeddingManager:
         if not self.enabled:
             return batch
         batch.ne_token_table = self.table
-        if batch.forward_mode == ForwardMode.EXTEND:
+        if batch.forward_mode.is_prebuilt():
+            self._seed_prebuilt_token_table(batch)
+        elif batch.forward_mode == ForwardMode.EXTEND:
             all_tokens = []
             column_starts = []
             request_lengths = []
@@ -247,6 +249,29 @@ class NgramEmbeddingManager:
                     else None
                 )
         return batch
+
+    def _seed_prebuilt_token_table(self, batch: ScheduleBatch) -> None:
+        # PD decode receives KV for the committed prefix. The token at
+        # seq_lens_cpu is the pending decode input and must also be in the OE
+        # table. Earlier columns cannot be read by the n-gram lookup.
+        tokens = []
+        column_starts = []
+        req_lens = []
+        for req, position in zip(batch.reqs, batch.seq_lens_cpu.tolist(), strict=True):
+            start = max(0, position - self.n + 1)
+            history = req.full_untruncated_fill_ids[start : position + 1]
+            tokens.extend(history)
+            column_starts.append(start)
+            req_lens.append(len(history))
+        table = self.table
+        device = table.device
+        _update_token_table(
+            tokens=async_h2d(tokens, dtype=table.dtype, device=device),
+            ne_token_table=table,
+            row_indices=batch.req_pool_indices,
+            column_starts=async_h2d(column_starts, dtype=torch.int32, device=device),
+            req_lens=async_h2d(req_lens, dtype=torch.int32, device=device),
+        )
 
     def _prepare_engram_history(self, batch: ScheduleBatch) -> None:
         """Refresh extend predecessors after prefix hits, retraction, or slot reuse."""

@@ -4248,19 +4248,18 @@ class SchedulerDisaggregationDecodeMixin:
         self._verify_kv_checksums(batch)
         if batch.is_empty():
             return None
-        self.ngram_embedding_manager.prepare_for_forward(
-            batch, chunked_req=self.chunked_req
-        )
         if nonblocking:
-            # Reused FutureMap rows are seeded after the previous forward and
-            # before the next one, without parking the host behind that forward.
+            # Reused history and FutureMap rows must be seeded after the
+            # previous forward without parking the host behind it.
             self.forward_stream.wait_stream(self.schedule_stream)
-            with self.forward_stream_ctx:
-                batch.process_prebuilt(self.future_map)
+        with self.forward_stream_ctx if nonblocking else contextlib.nullcontext():
+            self.ngram_embedding_manager.prepare_for_forward(
+                batch, chunked_req=self.chunked_req
+            )
+            batch.process_prebuilt(self.future_map)
+        if nonblocking:
             batch.req_pool_indices.record_stream(self.forward_stream)
             batch.seq_lens.record_stream(self.forward_stream)
-        else:
-            batch.process_prebuilt(self.future_map)
         return batch
 
     def _nonblocking_admit_in_scope(self: Scheduler, batch: ScheduleBatch) -> bool:
