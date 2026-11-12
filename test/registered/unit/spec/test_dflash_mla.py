@@ -11,16 +11,20 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from safetensors.torch import save_file
 from transformers import Qwen3Config
 
+from sglang.srt.configs.device_config import DeviceConfig
+from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import AttentionArch, ModelConfig
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
 from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
 from sglang.srt.model_executor.forward_mode import ForwardMode
-from sglang.srt.model_loader.loader import post_load_weights
+from sglang.srt.model_loader.loader import DefaultModelLoader, post_load_weights
 from sglang.srt.models.dflash import DFlashDraftModel, DFlashMLAAttention
 from sglang.srt.models.dspark import DSparkDraftModel
+from sglang.srt.models.kimi_k3_dspark import K3DSparkModel
 from sglang.srt.runtime_context import reset_context
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.dflash_utils import (
@@ -29,6 +33,9 @@ from sglang.srt.speculative.dflash_utils import (
 )
 from sglang.srt.speculative.dspark_components.dspark_config import (
     parse_dspark_draft_config,
+)
+from sglang.srt.speculative.dspark_components.quarot import (
+    prepare_kimi_k3_quarot_draft,
 )
 from sglang.srt.utils import BumpAllocator
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -237,6 +244,108 @@ class TestDFlashMLA(CustomTestCase):
                 ),
                 (KV_LORA + ROPE) * 2,
             )
+
+    def test_kimi_k3_dspark_loads_both_safetensors_and_aligns(self):
+        from sglang.srt.layers.utils import PPMissingLayer
+
+        fields = _export_fields(q_lora_rank=Q_LORA)
+        del fields["dflash_config"]
+        fields.update(
+            architectures=["K3DSparkModel"],
+            model_type="k3_dspark",
+            target_num_hidden_layers=8,
+            num_target_layers=2,
+            target_layer_ids=[2, 6],
+            target_hidden_size=HIDDEN,
+            draft_vocab_size=fields["vocab_size"],
+            markov_rank=4,
+            markov_head_type="vanilla",
+            mask_token_id=60,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            (path / "config.json").write_text(json.dumps(fields))
+            config = ModelConfig(folder, dtype="float32", is_draft_model=True)
+            self.assertEqual(config.attention_arch, AttentionArch.MLA)
+            self.assertEqual(config.hf_config.num_target_layers, 2)
+            self.assertEqual(config.hf_config.dflash_config["num_target_layers"], 8)
+            prototype = K3DSparkModel(config.hf_config)
+            self.assertEqual(
+                prototype.layers[0].self_attn.attn_mqa.attn_type,
+                AttentionType.ENCODER_ONLY,
+            )
+            aliases = {
+                "fc.weight": "context_proj.weight",
+                "hidden_norm.weight": "context_norm.weight",
+                "norm.weight": "final_norm.weight",
+            }
+            weights = {
+                aliases.get(name, name): torch.randn_like(param)
+                for name, param in prototype.named_parameters()
+            }
+            qkv_name = "layers.0.self_attn.fused_qkv_a_proj_with_mqa.weight"
+            q_a, kv_a = weights.pop(qkv_name).split((Q_LORA, KV_LORA + ROPE))
+            weights["layers.0.self_attn.q_a_proj.weight"] = q_a.clone()
+            weights["layers.0.self_attn.kv_a_proj_with_mqa.weight"] = kv_a.clone()
+            head = weights.pop("lm_head.weight")
+            save_file(weights, path / "model.safetensors")
+            save_file({"lm_head.weight": head}, path / "lm_head.safetensors")
+            model = DefaultModelLoader(LoadConfig()).load_model(
+                model_config=config, device_config=DeviceConfig("cpu")
+            )
+            self.assertIsInstance(model, K3DSparkModel)
+            torch.testing.assert_close(model.fc.weight, weights["context_proj.weight"])
+            torch.testing.assert_close(
+                model.hidden_norm.weight, weights["context_norm.weight"]
+            )
+            torch.testing.assert_close(model.norm.weight, weights["final_norm.weight"])
+            torch.testing.assert_close(model.lm_head.weight, head)
+            torch.testing.assert_close(
+                model.embed_tokens.weight, weights["embed_tokens.weight"]
+            )
+            torch.testing.assert_close(
+                model.layers[0].self_attn.fused_qkv_a_proj_with_mqa.weight,
+                torch.cat((q_a, kv_a)),
+            )
+
+            rotation = torch.roll(torch.eye(HIDDEN), 1, dims=1)
+            save_file({"global_rotation": rotation}, path / "rotation.safetensors")
+            target_runner = SimpleNamespace(
+                model_config=SimpleNamespace(
+                    model_path=folder,
+                    hf_text_config=SimpleNamespace(hidden_size=HIDDEN),
+                ),
+            )
+            context = torch.randn(3, 2, HIDDEN)
+            before = model.fc(context.flatten(1))
+            embed, lm_head = prepare_kimi_k3_quarot_draft(
+                model,
+                target_runner,
+                "rotation.safetensors",
+                PPMissingLayer(),
+                model.lm_head,
+            )
+            self.assertIs(embed, model.embed_tokens)
+            self.assertIs(lm_head, model.lm_head)
+            torch.testing.assert_close(lm_head.weight, head)
+            torch.testing.assert_close(embed.weight, weights["embed_tokens.weight"])
+            torch.testing.assert_close(
+                model.fc((context @ rotation).flatten(1)), before
+            )
+
+    def test_kimi_k3_raw_prefix_capture_uses_completed_residual(self):
+        from sglang.srt.layers.layer_boundary.residual import batch as residual_batch
+        from sglang.srt.models.kimi_k3 import KimiK3LinearModel
+
+        model = KimiK3LinearModel.__new__(KimiK3LinearModel)
+        torch.nn.Module.__init__(model)
+        model.dspark_capture_raw_prefix = True
+        batch = SimpleNamespace()
+        hidden_states = torch.randn(3, HIDDEN)
+        residual_batch.set_written(hidden_states, batch)
+        result = model._dspark_capture_stream(2, hidden_states, batch)
+        torch.testing.assert_close(result, hidden_states)
+        self.assertNotEqual(result.data_ptr(), hidden_states.data_ptr())
 
     def test_every_load_path_absorbs_kv_b_proj(self):
         """Split and fused checkpoints, and loaders that bypass load_weights,

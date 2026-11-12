@@ -83,6 +83,7 @@ def test_prepare_draft_uses_independent_vocab_layers(
     draft.fc = nn.Linear(10, 2, bias=False)
     draft.num_context_features = 5
     draft.is_nemotron_35_draft = False
+    draft.draft_config = SimpleNamespace(is_mla=False)
     head = ParallelLMHead(8, 2, enable_tp=False, padding_size=1)
     embed = VocabParallelEmbedding(8, 2, enable_tp=False, padding_size=1)
     original = torch.arange(16, dtype=torch.float32).reshape(8, 2)

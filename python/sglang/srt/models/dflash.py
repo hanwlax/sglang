@@ -488,13 +488,16 @@ class DFlashMLAAttention(DeepseekV2AttentionMLA):
     ) -> None:
         if quant_config is not None:
             raise ValueError("DFLASH mla drafts require unquantized draft weights.")
-        if get_parallel().attn_dcp_size > 1:
-            # The draft pool is not DCP-sharded, but the target MLA layer
-            # would gather across DCP ranks.
+        is_k3_dspark = getattr(config, "model_type", None) == "k3_dspark"
+        is_ascend_k3_draft = _is_npu and is_k3_dspark
+        if get_parallel().attn_dcp_size > 1 and not is_ascend_k3_draft:
+            # Ascend's draft backend uses allocator-global slots without DCP.
             raise ValueError("DFLASH mla drafts do not support --dcp-size > 1.")
         sliding_window_size, attn_type = _get_dflash_layer_attention_params(
             config, layer_id
         )
+        if is_k3_dspark:
+            attn_type = _get_dflash_attention_type(config, default=attn_type)
         if sliding_window_size > -1:
             from sglang.srt.speculative.draft_worker_common import (
                 resolve_draft_worker_attention_backend,
@@ -532,6 +535,11 @@ class DFlashMLAAttention(DeepseekV2AttentionMLA):
             attn_type=attn_type,
             sliding_window_size=sliding_window_size,
         )
+        if is_ascend_k3_draft:
+            # Like vLLM's MLA draft, keep the split projection and KV writer
+            # usable regardless of the target's fused preprocessing setting.
+            self.attn_mqa.disable_mla_preprocess = True
+            self._disable_npu_fused_split_qk_norm = True
         if self.q_lora_rank is not None:
             # SpecForge stores the two halves of the fused down projection.
             self.fused_qkv_a_proj_with_mqa.weight.weight_loader = (

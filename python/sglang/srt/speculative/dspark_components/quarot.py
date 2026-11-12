@@ -169,15 +169,16 @@ def prepare_kimi_k3_quarot_draft(
         get_embedding_tp_kwargs,
     )
     from sglang.srt.models.dspark import DSparkDraftModel
+    from sglang.srt.models.kimi_k3_dspark import K3DSparkModel
 
-    if (
+    is_k3_mla = isinstance(draft, K3DSparkModel)
+    if not is_k3_mla and (
         not isinstance(draft, DSparkDraftModel)
         or draft.is_nemotron_35_draft
+        or draft.draft_config.is_mla
         or getattr(draft, "uses_own_vocab_modules", False)
     ):
-        raise ValueError(
-            "Kimi K3 QuaRot currently requires a compatible GQA DSpark draft"
-        )
+        raise ValueError("Kimi K3 QuaRot requires a compatible DSpark draft.")
 
     config = target_runner.model_config
     checkpoint = Path(config.model_path)
@@ -195,6 +196,24 @@ def prepare_kimi_k3_quarot_draft(
     # Match vLLM Ascend's FP32 CPU projection fold. Vocab shards are much
     # smaller per rank and are transformed on their destination device.
     align_quarot_projection(draft.fc.weight, rotation, draft.num_context_features)
+    draft._derived_weight_cache_error = QUAROT_DRAFT_WEIGHT_UPDATE_ERROR
+    if is_k3_mla:
+        # The checkpoint embedding is already in the draft basis. Use the
+        # inverse-rotated target embedding when its shard is available and
+        # matches the draft placement. The draft head always stays as loaded.
+        draft_embed = draft.embed_tokens
+        if (
+            isinstance(embed_tokens, VocabParallelEmbedding)
+            and embed_tokens.shard_indices == draft_embed.shard_indices
+            and embed_tokens.weight.shape == draft_embed.weight.shape
+        ):
+            copy_unrotated_vocab_weight(
+                draft_embed.weight,
+                embed_tokens.weight,
+                rotation.to(draft_embed.weight.device),
+            )
+        return draft_embed, draft.lm_head
+
     rotation = rotation.to(lm_head.weight.device)
     if isinstance(embed_tokens, PPMissingLayer):
         with torch.device(rotation.device):
@@ -212,5 +231,4 @@ def prepare_kimi_k3_quarot_draft(
     else:
         embed_tokens = _unrotate_vocab_layer(embed_tokens, rotation)
     lm_head = _unrotate_vocab_layer(lm_head, rotation)
-    draft._derived_weight_cache_error = QUAROT_DRAFT_WEIGHT_UPDATE_ERROR
     return embed_tokens, lm_head

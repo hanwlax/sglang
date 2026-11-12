@@ -48,6 +48,7 @@ def configure_aux_hidden_state_capture(
     dflash_use_aux_hidden_state: bool,
     dflash_target_layer_ids,
     is_dspark: bool,
+    dspark_capture_raw_prefix: bool = False,
 ) -> None:
     """Configure auxiliary hidden state capture for speculative decoding.
 
@@ -63,7 +64,14 @@ def configure_aux_hidden_state_capture(
             )
         model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
     if dflash_use_aux_hidden_state:
-        if is_dspark and hasattr(model, "set_dspark_layers_to_capture"):
+        if dspark_capture_raw_prefix:
+            configure = getattr(model, "set_dspark_raw_prefix_layers_to_capture", None)
+            if configure is None:
+                raise ValueError(
+                    "Kimi K3 MLA DSpark requires raw-prefix-sum target capture."
+                )
+            configure(dflash_target_layer_ids)
+        elif is_dspark and hasattr(model, "set_dspark_layers_to_capture"):
             model.set_dspark_layers_to_capture(dflash_target_layer_ids)
         elif hasattr(model, "set_dflash_layers_to_capture"):
             model.set_dflash_layers_to_capture(dflash_target_layer_ids)

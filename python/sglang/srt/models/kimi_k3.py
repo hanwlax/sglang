@@ -2779,6 +2779,7 @@ class KimiK3LinearModel(nn.Module):
         self.config = config
         self.pp_group = get_parallel().pp_group
         self.dspark_layers_to_capture: Optional[list[int]] = None
+        self.dspark_capture_raw_prefix = False
         self._dp_attention = is_dp_attention_enabled()
         # Whether K3's SP collective is enabled on this rank, which the layers'
         # stage declarations depend on: settled once, before any is built.
@@ -3008,11 +3009,14 @@ class KimiK3LinearModel(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        """Stream value after `layer_idx` on the bank path: the pre-norm
-        mixture its next consumer would compute (next layer's attention side;
-        output side for the last layer). The standard path captures at the
-        next input instead."""
+        """Capture the completed layer output before or after the bank mix.
+
+        The materialized feature uses the next layer's attention-side read,
+        or the output-side read for the last layer.
+        """
         hidden_states = residual_batch.snapshot(hidden_states, forward_batch)
+        if self.dspark_capture_raw_prefix:
+            return hidden_states
         if layer_idx + 1 < self.end_layer:
             next_layer = self.layers[layer_idx + 1]
             score_proj = next_layer.self_attention_res_proj
@@ -3131,6 +3135,11 @@ class KimiK3LinearForCausalLM(nn.Module):
             )
         self.capture_aux_hidden_states = True
         self.model.dspark_layers_to_capture = list(layer_ids)
+        self.model.dspark_capture_raw_prefix = False
+
+    def set_dspark_raw_prefix_layers_to_capture(self, layer_ids: list[int]) -> None:
+        self.set_dspark_layers_to_capture(layer_ids)
+        self.model.dspark_capture_raw_prefix = True
 
     def set_dflash_layers_to_capture(self, layer_ids: list[int]) -> None:
         # DFLASH target_layer_ids name layer outputs, which is what the DSPARK
@@ -3573,8 +3582,8 @@ class KimiK3ForConditionalGeneration(nn.Module):
         self.mm_projector = KimiK3MultiModalProjector(
             config.vision_config,
             has_rotation=(
-                not config.language_only
-                and isinstance(quant_config, ModelSlimConfig)
+                isinstance(quant_config, ModelSlimConfig)
+                and not config.language_only
                 and quant_config.get_weight_quant_type(
                     maybe_prefix(prefix, "mm_projector.rot_proj")
                 )
@@ -3653,6 +3662,13 @@ class KimiK3ForConditionalGeneration(nn.Module):
                 "DSPARK layer capture is not available in encoder-only mode"
             )
         self.language_model.set_dspark_layers_to_capture(layer_ids)
+
+    def set_dspark_raw_prefix_layers_to_capture(self, layer_ids: list[int]) -> None:
+        if self.language_model is None:
+            raise AttributeError(
+                "DSPARK layer capture is not available in encoder-only mode"
+            )
+        self.language_model.set_dspark_raw_prefix_layers_to_capture(layer_ids)
 
     def get_aux_hidden_states_width(self) -> int:
         if self.language_model is None:

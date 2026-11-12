@@ -1161,6 +1161,7 @@ class ModelRunner:
             dflash_use_aux_hidden_state=self.spec_aux_config.dflash_use_aux_hidden_state,
             dflash_target_layer_ids=self.spec_aux_config.dflash_target_layer_ids,
             is_dspark=self.spec_aux_config.is_dspark,
+            dspark_capture_raw_prefix=self.spec_aux_config.dspark_capture_raw_prefix,
         )
         # Resolve before building: backends read the pair off the runner while
         # they construct (the FlashInfer KV-access check).

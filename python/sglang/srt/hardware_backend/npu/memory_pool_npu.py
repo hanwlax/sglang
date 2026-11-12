@@ -1003,16 +1003,29 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
         )
         return packed.view(self.dtype)
 
+    def set_mla_kv_buffer(
+        self,
+        layer: "RadixAttention",
+        loc_info,
+        cache_k_nope: torch.Tensor,
+        cache_k_rope: torch.Tensor,
+        layer_id_override: Optional[int] = None,
+    ):
+        self.set_kv_buffer(
+            layer, loc_info, cache_k_nope, cache_k_rope, layer_id_override
+        )
+
     def set_kv_buffer(
         self,
         layer: "RadixAttention",
         loc_info,
         cache_k: torch.Tensor,
         cache_v: torch.Tensor,
+        layer_id_override: Optional[int] = None,
     ):
         loc, _, _ = unwrap_write_loc(loc_info)
         self._raise_if_native_kv_cache_disabled()
-        layer_id = layer.layer_id
+        layer_id = layer.layer_id if layer_id_override is None else layer_id_override
         if self.dsa_kv_cache_store_fp8:
             if cache_v is None:
                 cache_k, cache_v = cache_k.split(

@@ -122,3 +122,26 @@ class KimiK3Config(PretrainedConfig):
     @property
     def vocab_size(self) -> int:
         return self.text_config.vocab_size
+
+
+class KimiK3DSparkConfig(PretrainedConfig):
+    model_type = "k3_dspark"
+
+    def __init__(
+        self,
+        dflash_config: dict | None = None,
+        num_target_layers: int | None = None,
+        target_num_hidden_layers: int | None = None,
+        full_attention_causal: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_target_layers = num_target_layers
+        self.target_num_hidden_layers = target_num_hidden_layers
+        self.full_attention_causal = full_attention_causal
+        self.dflash_config = dict(dflash_config or {})
+        # TorchSpec counts captured features in num_target_layers. The DFlash
+        # parser uses the same name for the depth of the full target backbone.
+        self.dflash_config["num_target_layers"] = target_num_hidden_layers
+        self.dflash_config["attention_mode"] = "mla"
+        self.is_causal = self.dflash_config.get("causal", full_attention_causal)

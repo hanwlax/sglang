@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 
-from sglang.srt.configs.model_config import ModelConfig, is_deepseek_v4
+from sglang.srt.configs.model_config import (
+    ModelConfig,
+    is_deepseek_v4,
+    is_kimi_k3_dspark,
+)
 from sglang.srt.runtime_context import get_exec, get_spec
 
 if TYPE_CHECKING:
@@ -48,6 +52,7 @@ class SpecAuxHiddenStateConfig(msgspec.Struct, kw_only=True):
     draft_kv_num_layers: Optional[int] = None
     # Route the DFLASH-family capture to the model's DSPARK hook when it has one.
     is_dspark: bool = False
+    dspark_capture_raw_prefix: bool = False
 
 
 def resolve_spec_aux_hidden_state_config(
@@ -276,8 +281,34 @@ def _resolve_dflash_aux_hidden_state(
                 if is_deepseek_v4(draft_model_config.hf_config):
                     config.dspark_num_stages = len(target_layer_ids)
 
+            if is_kimi_k3_dspark(draft_model_config.hf_config):
+                _validate_kimi_k3_dspark_target(
+                    draft_model_config.hf_config,
+                    model_config.hf_text_config,
+                    target_layer_ids,
+                )
+                config.dspark_capture_raw_prefix = True
+
         config.dflash_use_aux_hidden_state = True
         config.dflash_draft_num_layers = int(draft_num_layers)
         config.draft_model_config = draft_model_config
         config.draft_kv_num_layers = int(draft_num_layers)
         config.dflash_target_layer_ids = target_layer_ids
+
+
+def _validate_kimi_k3_dspark_target(draft, target, layer_ids) -> None:
+    if (
+        draft.target_hidden_size != target.hidden_size
+        or draft.vocab_size != target.vocab_size
+        or (
+            draft.target_num_hidden_layers is not None
+            and draft.target_num_hidden_layers != target.num_hidden_layers
+        )
+    ):
+        raise ValueError("Kimi K3 DSpark draft and target dimensions are incompatible.")
+    if (
+        len(layer_ids) != draft.num_target_layers
+        or sorted(set(layer_ids)) != layer_ids
+        or any(not 0 <= layer < target.num_hidden_layers for layer in layer_ids)
+    ):
+        raise ValueError("Kimi K3 DSpark requires ordered, valid target layer IDs.")

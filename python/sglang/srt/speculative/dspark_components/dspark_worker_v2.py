@@ -7,6 +7,7 @@ from sglang.kernels.ops.speculative.dspark.blockwise_rejection import (
     make_rejection_noise,
 )
 from sglang.srt.configs.hybrid_arch import mambaish_config
+from sglang.srt.configs.model_config import is_kimi_k3_dspark
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_dp_tp_group
 from sglang.srt.layers.logprob_processor import compute_spec_logprobs
@@ -307,7 +308,20 @@ class DSparkWorkerV2(BaseSpecWorker):
         target_model = target_runner.model
         rotation_file = kimi_k3_quarot_rotation_file(target_model)
         draft_anchor_embedding = None
-        if (
+        if is_kimi_k3_dspark(self.draft_model_runner.model_config.hf_config):
+            draft_anchor_embedding = self.draft_model.embed_tokens
+            if rotation_file is not None:
+                target_embed = unwrap_lora_layer(
+                    self._resolve_target_embed_tokens(target_model)
+                )
+                draft_anchor_embedding, _ = prepare_kimi_k3_quarot_draft(
+                    self.draft_model,
+                    target_runner,
+                    rotation_file,
+                    target_embed,
+                    self.draft_model.lm_head,
+                )
+        elif (
             getattr(self.draft_model, "uses_own_vocab_modules", False)
             and rotation_file is None
         ):

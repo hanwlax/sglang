@@ -265,7 +265,15 @@ def uses_kda_attention(config) -> bool:
 
 
 def is_dspark_draft(config) -> bool:
-    return _hf_arch(config) in ("DSparkDraftModel", "DSparkMiniMaxDraftModel")
+    return _hf_arch(config) in (
+        "DSparkDraftModel",
+        "DSparkMiniMaxDraftModel",
+        "K3DSparkModel",
+    )
+
+
+def is_kimi_k3_dspark(config) -> bool:
+    return _hf_arch(config) == "K3DSparkModel"
 
 
 # The decision_config.json attention mode whose full-attention layers read the whole prompt.

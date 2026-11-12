@@ -199,7 +199,9 @@ def forward_mla_prepare_npu(
 ):
     kv_quant_scheme = getattr(m.attn_mqa, "scheme", None)
     q_descale = None
-    if is_mla_preprocess_enabled():
+    if is_mla_preprocess_enabled() and not getattr(
+        m.attn_mqa, "disable_mla_preprocess", False
+    ):
         if not hasattr(m, "mla_preprocess"):
             m.mla_preprocess = NPUFusedMLAPreprocess(
                 m.fused_qkv_a_proj_with_mqa,

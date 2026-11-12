@@ -1816,7 +1816,11 @@ class AscendAttnBackend(AttentionBackend):
         q_descale: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        if is_mla_preprocess_enabled() and self.use_mla:
+        if (
+            is_mla_preprocess_enabled()
+            and self.use_mla
+            and not getattr(layer, "disable_mla_preprocess", False)
+        ):
             # DSA callers set save_kv_cache based on whether preprocessing was used.
             # Only override it for the existing non-sparse MLA path.
             if topk_indices is None:
@@ -3044,6 +3048,9 @@ class AscendAttnBackend(AttentionBackend):
                     )
 
             num_query_heads = q_nope.shape[1]
+            causal = layer.attn_type != AttentionType.ENCODER_ONLY
+            sparse_mode = 3 if causal else 0
+            attn_mask = self.mtp_mask if causal else None
             if self.use_fias_v2_bsnd:
                 # The existing paged MLA cache is [block, KV_N, page, D].
                 # V2 consumes it with BNSD queries; keep the cache unchanged.
@@ -3109,8 +3116,8 @@ class AscendAttnBackend(AttentionBackend):
                         softmax_scale=layer.scaling,
                         block_table=block_table,
                         block_size=self.page_size,
-                        sparse_mode=3,
-                        atten_mask=self.mtp_mask,
+                        sparse_mode=sparse_mode,
+                        atten_mask=attn_mask,
                         actual_seq_qlen=(
                             None
                             if modelslim_kv_scheme is not None
@@ -3118,7 +3125,7 @@ class AscendAttnBackend(AttentionBackend):
                         ),
                         actual_seq_kvlen=actual_seq_lengths_kv,
                         pre_tokens=FULL_ATTENTION_WINDOW,
-                        next_tokens=0,
+                        next_tokens=0 if causal else FULL_ATTENTION_WINDOW,
                         **quant_kwargs,
                     )
                     attn_output = (
@@ -3140,8 +3147,8 @@ class AscendAttnBackend(AttentionBackend):
                     softmax_scale=layer.scaling,
                     block_table=block_table,
                     block_size=self.page_size,
-                    sparse_mode=3,
-                    atten_mask=self.mtp_mask,
+                    sparse_mode=sparse_mode,
+                    atten_mask=attn_mask,
                     actual_seq_qlen=actual_seq_lengths,
                     actual_seq_kvlen=actual_seq_lengths_kv,
                     out_dtype=modelslim_kv_scheme.compute_dtype,
@@ -3168,8 +3175,8 @@ class AscendAttnBackend(AttentionBackend):
                         antiquant_scale=None,
                         block_table=block_table,
                         block_size=self.page_size,
-                        sparse_mode=3,
-                        atten_mask=self.mtp_mask,
+                        sparse_mode=sparse_mode,
+                        atten_mask=attn_mask,
                         actual_seq_lengths=actual_seq_lengths,
                         actual_seq_lengths_kv=actual_seq_lengths_kv,
                     )
@@ -3190,8 +3197,8 @@ class AscendAttnBackend(AttentionBackend):
                     antiquant_scale=None,
                     block_table=block_table,
                     block_size=self.page_size,
-                    sparse_mode=3,
-                    atten_mask=self.mtp_mask,
+                    sparse_mode=sparse_mode,
+                    atten_mask=attn_mask,
                     actual_seq_lengths=actual_seq_lengths,
                     actual_seq_lengths_kv=actual_seq_lengths_kv,
                     workspace=workspace,
@@ -3539,7 +3546,11 @@ class AscendAttnBackend(AttentionBackend):
         **kwargs,
     ):
         return_softmax_lse = kwargs.pop("return_softmax_lse", False)
-        if is_mla_preprocess_enabled() and self.use_mla:
+        if (
+            is_mla_preprocess_enabled()
+            and self.use_mla
+            and not getattr(layer, "disable_mla_preprocess", False)
+        ):
             # DSA callers set save_kv_cache based on whether preprocessing was used.
             # Only override it for the existing non-sparse MLA path.
             if topk_indices is None:
