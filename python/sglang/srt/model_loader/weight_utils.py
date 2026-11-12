@@ -39,6 +39,7 @@ from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from sglang.srt.configs.load_config import (
     _DEFAULT_LOAD_GROUP,
@@ -84,6 +85,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 RUNAI_STREAMER_TENSOR_ATTR = "_sglang_runai_streamer_tensor"
+MODELSLIM_SAFETENSORS_INDEX_NAME = "quant_model_weights.safetensors.index.json"
+
+
+def get_safetensors_index_path(folder: str | Path) -> Optional[Path]:
+    for name in (SAFE_WEIGHTS_INDEX_NAME, MODELSLIM_SAFETENSORS_INDEX_NAME):
+        path = Path(folder, name)
+        if path.is_file():
+            return path
+    return None
 
 
 # Matches routed-expert weight keys in both HF-style layouts

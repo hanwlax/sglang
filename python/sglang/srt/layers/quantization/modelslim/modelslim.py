@@ -335,6 +335,20 @@ class ModelSlimConfig(QuantizationConfig):
                 return candidate
         return prefix
 
+    def get_weight_quant_type(self, prefix: str) -> Optional[str]:
+        return self.quant_description.get(
+            self._resolve_quant_prefix(prefix) + ".weight"
+        )
+
+    @property
+    def quarot_rotation_file(self) -> Optional[str]:
+        return (
+            self.quant_description.get("optional", {})
+            .get("quarot", {})
+            .get("rotation_map", {})
+            .get("global_rotation")
+        )
+
     def get_linear_method(self) -> ModelSlimLinearMethod:
         return ModelSlimLinearMethod(self)
 

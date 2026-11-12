@@ -872,7 +872,7 @@ class KimiK3MultiModalProjector(nn.Module):
     """PatchMergerMLPV2: bias-free two-layer MLP over merged patches with a
     post RMSNorm; K3 has no pre-norm, unlike the K2.5 projector."""
 
-    def __init__(self, vision_config):
+    def __init__(self, vision_config, *, has_rotation: bool = False):
         super().__init__()
         config = vision_config
         mm_hidden_size = (
@@ -891,6 +891,11 @@ class KimiK3MultiModalProjector(nn.Module):
             nn.Linear(self.hidden_size, text_hidden_size, bias=False),
         )
         self.post_norm = nn.RMSNorm(text_hidden_size, eps=eps)
+        self.rot_proj = (
+            nn.Linear(text_hidden_size, text_hidden_size, bias=False)
+            if has_rotation
+            else None
+        )
 
     def forward(
         self, image_features: Union[torch.Tensor, List[torch.Tensor]]
@@ -901,4 +906,5 @@ class KimiK3MultiModalProjector(nn.Module):
             )
         else:
             x = image_features.reshape(image_features.shape[0], -1)
-        return self.post_norm(self.proj(x))
+        x = self.post_norm(self.proj(x))
+        return self.rot_proj(x) if self.rot_proj is not None else x

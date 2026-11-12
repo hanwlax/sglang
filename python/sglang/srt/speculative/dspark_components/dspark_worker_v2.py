@@ -82,6 +82,10 @@ from sglang.srt.speculative.dspark_components.dspark_verify import (
     target_model_type,
     verify_logits_adjustments_are_noop,
 )
+from sglang.srt.speculative.dspark_components.quarot import (
+    kimi_k3_quarot_rotation_file,
+    prepare_kimi_k3_quarot_draft,
+)
 from sglang.srt.speculative.spec_sampling_mask import (
     SpeculativeSamplingMaskCapture,
 )
@@ -299,23 +303,42 @@ class DSparkWorkerV2(BaseSpecWorker):
             draft_token_num=int(self.query_token_num), device=self.device
         )
 
-        if getattr(self.draft_model, "uses_own_vocab_modules", False):
+        target_runner = self.model_runner
+        target_model = target_runner.model
+        rotation_file = kimi_k3_quarot_rotation_file(target_model)
+        draft_anchor_embedding = None
+        if (
+            getattr(self.draft_model, "uses_own_vocab_modules", False)
+            and rotation_file is None
+        ):
             if get_parallel().tp_rank == 0:
                 logger.info(
                     "DSpark draft uses its checkpoint-local embedding and LM head."
                 )
         else:
-            target_model = self.target_worker.model_runner.model
             lm_head = unwrap_lora_layer(getattr(target_model, "lm_head", None))
             if lm_head is None or not hasattr(lm_head, "weight"):
                 raise RuntimeError(
                     "DSpark requires the target model to expose `lm_head` with `weight`."
                 )
+            embed_tokens = unwrap_lora_layer(
+                self._resolve_target_embed_tokens(target_model)
+            )
+            if rotation_file is not None:
+                embed_tokens, lm_head = prepare_kimi_k3_quarot_draft(
+                    self.draft_model,
+                    target_runner,
+                    rotation_file,
+                    embed_tokens,
+                    lm_head,
+                )
+                draft_anchor_embedding = embed_tokens
+                if self._target_tp_rank == 0:
+                    logger.info(
+                        "Aligned Kimi K3 QuaRot projection, embedding and LM head for DSpark."
+                    )
             self.draft_model.attach_shared_modules(
-                embed_tokens=unwrap_lora_layer(
-                    self._resolve_target_embed_tokens(target_model)
-                ),
-                lm_head=lm_head,
+                embed_tokens=embed_tokens, lm_head=lm_head
             )
         self._target_hidden_projection_enabled = False
 
@@ -381,6 +404,7 @@ class DSparkWorkerV2(BaseSpecWorker):
             greedy_draft=self._greedy_draft,
             sharded_accept=self._sharded_accept,
             dp_moe_sync=self._draft_is_moe and get_parallel().attn_dp_enabled,
+            draft_anchor_embedding=draft_anchor_embedding,
         )
         self._verify_epilogue = None
         self._sampling_accept_graph: Optional[DsparkSamplingAcceptGraph] = None

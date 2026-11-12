@@ -139,6 +139,9 @@ from sglang.srt.runtime_context import (
     get_platform,
     get_spec,
 )
+from sglang.srt.speculative.dspark_components.quarot import (
+    QUAROT_DRAFT_WEIGHT_UPDATE_ERROR,
+)
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import is_hip, is_npu, make_pp_layers
 from sglang.srt.utils.common import (
@@ -157,6 +160,16 @@ _EXPERT_WEIGHT_NAME = re.compile(r"experts\.\d+\.w[123]\.")
 _is_hip = is_hip()
 _is_npu = is_npu()
 _aiter_k3_opt = get_bool_env_var("SGLANG_AITER_K3_OPT")
+
+
+def _can_fuse_kda_qkvg(quant_config: Optional[QuantizationConfig], prefix: str) -> bool:
+    if not isinstance(quant_config, ModelSlimConfig):
+        return True
+    qkv_types = {
+        quant_config.get_weight_quant_type(f"{prefix}.{name}_proj") for name in "qkv"
+    }
+    gate_type = quant_config.get_weight_quant_type(f"{prefix}.g_proj")
+    return qkv_types == {gate_type}
 
 
 def _cdiv(a: int, b: int) -> int:
@@ -1585,15 +1598,14 @@ class KimiK3DeltaAttention(nn.Module):
             quant_config, f"{prefix}.b_proj"
         )
 
-        # The full-rank [q, k, v, g] merged projection is explicitly sharded
-        # using attention-TP placement, so it also supports DP attention.
-        # The low-rank fused path still uses full-TP-only projection helpers.
-        # For the full-rank gate (K3) the checkpoint quantizes only the MoE
-        # experts; attention linears resolve to UnquantizedLinearMethod, so a
-        # non-None quant_config is fine for the merged projection.
+        # The full-rank projection uses attention TP. ModelSlim QuaRot
+        # checkpoints can quantize Q/K/V while keeping the output gate in BF16.
+        self._fuse_qkvg = self.use_full_rank_gate and _can_fuse_kda_qkvg(
+            quant_config, prefix
+        )
         self.do_fuse_qkvbfg = quant_config is None and self.attn_tp_size == self.tp_size
 
-        if self.use_full_rank_gate:
+        if self._fuse_qkvg:
             # Fuse only the wide projections [q, k, v, g]: folding b (12/rank)
             # and f_a (128, replicated) in skews the output dim and degrades
             # GEMM kernel selection; they stay as separate tiny GEMVs. ROCm
@@ -1855,7 +1867,7 @@ class KimiK3DeltaAttention(nn.Module):
 
         Called once after weight loading. Block-FP8 inputs are dequantized into
         the BF16 tiny-GEMM buffers here."""
-        if not self.use_full_rank_gate:
+        if not self._fuse_qkvg:
             return
         if _is_npu:
             return
@@ -2142,7 +2154,7 @@ class KimiK3DeltaAttention(nn.Module):
         defer_f_b = (
             self._kda_hip_fused_decode_ready and forward_batch.forward_mode.is_decode()
         )
-        if self.do_fuse_qkvbfg or self.use_full_rank_gate:
+        if self.do_fuse_qkvbfg or self._fuse_qkvg:
             mixed_qkv, beta, forget_gate, g_proj_states = self.forward_qkvbfg_fused(
                 hidden_states, defer_f_b=defer_f_b
             )
@@ -3051,6 +3063,13 @@ class KimiK3LinearForCausalLM(nn.Module):
         self.quant_config = quant_config
         if quant_config is not None:
             if isinstance(quant_config, ModelSlimConfig):
+                if (
+                    quant_config.quarot_rotation_file is not None
+                    and SpeculativeAlgorithm.from_string(
+                        get_spec().speculative_algorithm
+                    ).is_dspark()
+                ):
+                    self._derived_weight_cache_error = QUAROT_DRAFT_WEIGHT_UPDATE_ERROR
                 model_mapping = {
                     **quant_config.packed_modules_mapping.get("model", {}),
                     **self.packed_modules_mapping,
@@ -3302,11 +3321,8 @@ class KimiK3LinearForCausalLM(nn.Module):
                     if not self.config.is_kda_layer(layer_id):
                         continue
                     layer = self.model.layers[layer_id].self_attn
-                    # Full-rank K3 always instantiates fused_qkvg_proj, including
-                    # ModelSlim-quantized models. The low-rank fused modules are
-                    # still conditional on do_fuse_qkvbfg.
                     if param_name == ".fused_qkvg_proj":
-                        if not getattr(layer, "use_full_rank_gate", False):
+                        if not layer._fuse_qkvg:
                             continue
                     elif not getattr(layer, "do_fuse_qkvbfg", False):
                         continue
@@ -3554,7 +3570,17 @@ class KimiK3ForConditionalGeneration(nn.Module):
         self.use_data_parallel = True
 
         self.vision_tower = KimiK3VisionTower(config.vision_config)
-        self.mm_projector = KimiK3MultiModalProjector(config.vision_config)
+        self.mm_projector = KimiK3MultiModalProjector(
+            config.vision_config,
+            has_rotation=(
+                not config.language_only
+                and isinstance(quant_config, ModelSlimConfig)
+                and quant_config.get_weight_quant_type(
+                    maybe_prefix(prefix, "mm_projector.rot_proj")
+                )
+                == "FLOAT"
+            ),
+        )
 
         self.language_model = None
         if not config.encoder_only:

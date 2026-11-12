@@ -361,11 +361,13 @@ class DraftBlockProposer:
         greedy_draft: bool,
         sharded_accept: bool = False,
         dp_moe_sync: bool = False,
+        draft_anchor_embedding: Optional[torch.nn.Module] = None,
     ) -> None:
         self.draft_model = draft_model
         self.draft_model_runner = draft_model_runner
         self.gamma = gamma
         self.sample_from_anchor = bool(draft_model.sample_from_anchor)
+        self.draft_anchor_embedding = draft_anchor_embedding
         self.query_token_num = self.gamma if self.sample_from_anchor else self.gamma + 1
         self._mask_token_id = mask_token_id
         self._draft_block_spec_info = draft_block_spec_info
@@ -456,11 +458,14 @@ class DraftBlockProposer:
         sampling_info,
         anchor_prepared: bool = False,
     ) -> DraftProposal:
-        embed_module = unwrap_lora_layer(
-            self.draft_model.embed_tokens
-            if not self.sample_from_anchor
-            else target_model.get_input_embeddings()
-        )
+        if self.draft_anchor_embedding is not None:
+            embed_module = self.draft_anchor_embedding
+        else:
+            embed_module = unwrap_lora_layer(
+                self.draft_model.embed_tokens
+                if not self.sample_from_anchor
+                else target_model.get_input_embeddings()
+            )
         draft_sampler = self._draft_sampler
         fwd = self._run_forward(
             batch=batch,

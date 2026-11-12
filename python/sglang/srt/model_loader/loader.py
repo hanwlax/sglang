@@ -113,6 +113,7 @@ DEFAULT_GPU_MEMORY_FRACTION_FOR_CALIBRATION = (
 )
 from sglang.srt.environ import envs
 from sglang.srt.model_loader.weight_utils import (
+    MODELSLIM_SAFETENSORS_INDEX_NAME,
     CheckpointFilePrefetchHandle,
     _prefetch_all_checkpoints,
     buffered_multi_thread_safetensors_weights_iterator,
@@ -123,6 +124,7 @@ from sglang.srt.model_loader.weight_utils import (
     filter_files_not_needed_for_inference,
     get_gguf_extra_tensor_names,
     get_quant_config,
+    get_safetensors_index_path,
     gguf_quant_weights_iterator,
     initialize_capture_safe_weights,
     initialize_dummy_weights,
@@ -575,6 +577,25 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.download_dir,
                     revision,
                 )
+            if index_file == SAFE_WEIGHTS_INDEX_NAME:
+                index_path = get_safetensors_index_path(hf_folder)
+                if (
+                    index_path is None
+                    and not is_local
+                    and any(
+                        os.path.basename(path).startswith("quant_model_weights-")
+                        for path in hf_weights_files
+                    )
+                ):
+                    download_safetensors_index_file_from_hf(
+                        model_name_or_path,
+                        MODELSLIM_SAFETENSORS_INDEX_NAME,
+                        self.load_config.download_dir,
+                        revision,
+                    )
+                    index_path = get_safetensors_index_path(hf_folder)
+                if index_path is not None:
+                    index_file = index_path.name
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files,
                 hf_folder,
