@@ -45,6 +45,7 @@ from sglang.kernels.ops.gemm.bf16_fp32 import (
 )
 from sglang.kernels.ops.quantization.fp8_kernel import is_fp8_fnuz
 from sglang.srt.configs.longcat_flash import LongcatFlashConfig
+from sglang.srt.debug_utils.longcat_activation_trace import LongCatActivationTrace
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
@@ -93,6 +94,8 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_mode import ForwardMode
+from sglang.srt.model_executor.runner_utils.capture_mode import get_is_capture_mode
 from sglang.srt.model_loader.utils import (
     maybe_executor_submit,
     should_async_load,
@@ -319,7 +322,9 @@ class LongcatFlashMoE(nn.Module):
         self.topk.bind_runner_backend(self.experts.runner_backend)
 
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        trace: Optional[LongCatActivationTrace] = None,
     ) -> torch.Tensor | Tuple[torch.Tensor, Optional[torch.Tensor]]:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -327,12 +332,17 @@ class LongcatFlashMoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = self.router(hidden_states)
+        if trace is not None:
+            trace.record(self.layer_id, "router.logits", router_logits)
         topk_weights, topk_idx, _ = self.topk(
             hidden_states,
             router_logits,
         )
         if _is_npu:
             topk_weights = topk_weights * self.routed_scaling_factor
+        if trace is not None:
+            trace.record(self.layer_id, "router.expert_ids", topk_idx)
+            trace.record(self.layer_id, "router.weights", topk_weights)
         if self.zero_expert_type is not None and num_tokens > 0:
             zero_expert_kwargs = (
                 {"identity_mask_value": -1 if get_moe_a2a_backend().is_deepep() else 0}
@@ -348,6 +358,9 @@ class LongcatFlashMoE(nn.Module):
                 **zero_expert_kwargs,
             )
         topk_output = StandardTopKOutput(topk_weights, topk_idx, _)
+        if trace is not None:
+            trace.record(self.layer_id, "moe.dispatch_ids", topk_idx)
+            trace.record(self.layer_id, "moe.dispatch_weights", topk_weights)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
 
@@ -486,9 +499,12 @@ class LongcatFlashDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
         prev_topk_indices: Optional[torch.Tensor],
+        trace: Optional[LongCatActivationTrace] = None,
     ) -> torch.Tensor:
         # first_attn
         hidden_states = self.attn_boundary.prepare(hidden_states, forward_batch)
+        if trace is not None:
+            trace.record(self.layer_id, "attn0.input", hidden_states)
         if hidden_states.shape[0] != 0:
             attn_out = self.self_attn[0](
                 positions=positions,
@@ -499,22 +515,38 @@ class LongcatFlashDecoderLayer(nn.Module):
             )
             if isinstance(attn_out, tuple):
                 hidden_states, prev_topk_indices = attn_out
+                if trace is not None:
+                    trace.record(self.layer_id, "attn0.indexer", prev_topk_indices)
             else:
                 hidden_states = attn_out
+        if trace is not None:
+            trace.record(self.layer_id, "attn0.local_output", hidden_states)
 
         # moe
         hidden_states = self.attn_boundary.finish(hidden_states, forward_batch)
         hidden_states = self.moe_boundary.prepare(hidden_states, forward_batch)
-        moe_hidden_states = self.mlp(hidden_states.clone())
+        if trace is None:
+            moe_hidden_states = self.mlp(hidden_states.clone())
+        else:
+            trace.record(self.layer_id, "moe.input", hidden_states)
+            moe_hidden_states = self.mlp(hidden_states.clone(), trace=trace)
         if _is_npu:
             moe_hidden_states, zero_expert_result = moe_hidden_states
+        if trace is not None:
+            trace.record(self.layer_id, "moe.experts_output", moe_hidden_states)
+            if _is_npu:
+                trace.record(self.layer_id, "moe.identity", zero_expert_result)
         moe_hidden_states = self.moe_boundary.branch_output(
             moe_hidden_states, forward_batch
         )
+        if trace is not None:
+            trace.record(self.layer_id, "moe.reduced", moe_hidden_states)
         if _is_npu and zero_expert_result is not None:
             # Add identity after the expert sum, on the same output token rows.
             rows, _, to = self.moe_boundary.plan.branch_rows(forward_batch)
             moe_hidden_states += move_rows(zero_expert_result, rows, to, forward_batch)
+        if trace is not None:
+            trace.record(self.layer_id, "moe.branch_output", moe_hidden_states)
 
         hidden_states, prev_topk_indices = self.forward_mlp(
             hidden_states,
@@ -522,6 +554,7 @@ class LongcatFlashDecoderLayer(nn.Module):
             forward_batch,
             zero_allocator,
             prev_topk_indices,
+            trace,
         )
 
         hidden_states = self.moe_boundary.merge_branch(
@@ -530,6 +563,11 @@ class LongcatFlashDecoderLayer(nn.Module):
             self.second_ffn_boundary,
             forward_batch,
         )
+        if trace is not None:
+            trace.record(self.layer_id, "layer.output", hidden_states)
+            trace.record(
+                self.layer_id, "layer.residual", forward_batch.residual_stream.residual
+            )
         return hidden_states, prev_topk_indices
 
     def forward_mlp(
@@ -539,16 +577,33 @@ class LongcatFlashDecoderLayer(nn.Module):
         forward_batch,
         zero_allocator,
         prev_topk_indices,
+        trace: Optional[LongCatActivationTrace] = None,
     ):
         # first_mlp, on the input the MoE's boundary read
         hidden_states = self.first_ffn_boundary.branch_input(
             self.moe_boundary, hidden_states, forward_batch
         )
+        if trace is not None:
+            trace.record(self.layer_id, "ffn0.input", hidden_states)
+            trace.record(
+                self.layer_id,
+                "ffn0.residual_in",
+                forward_batch.residual_stream.residual,
+            )
         hidden_states = self.mlps[0](hidden_states)
+        if trace is not None:
+            trace.record(self.layer_id, "ffn0.local_output", hidden_states)
         hidden_states = self.first_ffn_boundary.finish(hidden_states, forward_batch)
+        if trace is not None and isinstance(hidden_states, torch.Tensor):
+            trace.record(self.layer_id, "ffn0.finish", hidden_states)
 
         # second_attn_boundary
         hidden_states = self.second_attn_boundary.prepare(hidden_states, forward_batch)
+        if trace is not None:
+            trace.record(self.layer_id, "attn1.input", hidden_states)
+            trace.record(
+                self.layer_id, "attn1.residual", forward_batch.residual_stream.residual
+            )
         if hidden_states.shape[0] != 0:
             attn_out = self.self_attn[1](
                 positions=positions,
@@ -559,14 +614,29 @@ class LongcatFlashDecoderLayer(nn.Module):
             )
             if isinstance(attn_out, tuple):
                 hidden_states, prev_topk_indices = attn_out
+                if trace is not None:
+                    trace.record(self.layer_id, "attn1.indexer", prev_topk_indices)
             else:
                 hidden_states = attn_out
+        if trace is not None:
+            trace.record(self.layer_id, "attn1.local_output", hidden_states)
 
         # second_mlp
         hidden_states = self.second_attn_boundary.finish(hidden_states, forward_batch)
         hidden_states = self.second_ffn_boundary.prepare(hidden_states, forward_batch)
+        if trace is not None:
+            trace.record(self.layer_id, "ffn1.input", hidden_states)
+            trace.record(
+                self.layer_id,
+                "ffn1.residual_in",
+                forward_batch.residual_stream.residual,
+            )
         hidden_states = self.mlps[1](hidden_states)
+        if trace is not None:
+            trace.record(self.layer_id, "ffn1.local_output", hidden_states)
         hidden_states = self.second_ffn_boundary.finish(hidden_states, forward_batch)
+        if trace is not None and isinstance(hidden_states, torch.Tensor):
+            trace.record(self.layer_id, "ffn1.finish", hidden_states)
 
         return hidden_states, prev_topk_indices
 
@@ -631,6 +701,7 @@ class LongcatFlashModel(nn.Module):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
+        trace: Optional[LongCatActivationTrace] = None,
     ) -> torch.Tensor:
         total_num_layers = len(self.layers)
         device = input_embeds.device if input_embeds is not None else input_ids.device
@@ -642,10 +713,18 @@ class LongcatFlashModel(nn.Module):
         if input_embeds is None:
             if self.use_ngram_embedding:
                 hidden_states = self.embed_tokens(input_ids, forward_batch)
+                if trace is not None:
+                    trace.record(
+                        -1,
+                        "embedding.oe_ids",
+                        self.embed_tokens.oe_n_gram_ids[: len(input_ids)],
+                    )
             else:
                 hidden_states = self.embed_tokens(input_ids)
         else:
             hidden_states = input_embeds
+        if trace is not None:
+            trace.record(-1, "embedding.output", hidden_states)
 
         residual_batch.start(forward_batch)
 
@@ -664,11 +743,14 @@ class LongcatFlashModel(nn.Module):
                     forward_batch,
                     zero_allocator,
                     topk_indices,
+                    trace,
                 )
 
         hidden_states = residual_batch.final_norm(
             hidden_states, forward_batch, self.norm, skip_empty=True
         )
+        if trace is not None:
+            trace.record(-1, "final_norm.output", hidden_states)
 
         if len(aux_hidden_states) == 0:
             return hidden_states
@@ -714,6 +796,7 @@ class LongcatFlashForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config)
         self.capture_aux_hidden_states = False
+        self.trace_activations = envs.SGLANG_DEBUG_LONGCAT_ACTIVATIONS.get()
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
@@ -726,15 +809,36 @@ class LongcatFlashForCausalLM(nn.Module):
         forward_batch: ForwardBatch,
         input_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, forward_batch, input_embeds)
+        trace = None
+        mode = forward_batch.forward_mode
+        if (
+            self.trace_activations
+            and not get_is_capture_mode()
+            and forward_batch.batch_size == 1
+            and mode in (ForwardMode.EXTEND, ForwardMode.DECODE)
+            and input_ids.ndim == positions.ndim == 1
+            and 0 < input_ids.numel() == positions.numel()
+        ):
+            trace = LongCatActivationTrace(
+                get_parallel().tp_rank, mode.name, input_ids, positions
+            )
+        hidden_states = self.model(
+            input_ids, positions, forward_batch, input_embeds, trace
+        )
 
         aux_hidden_states = None
         if self.capture_aux_hidden_states:
             hidden_states, aux_hidden_states = hidden_states
 
-        return self.logits_processor(
+        logits = self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
         )
+        if trace is not None:
+            trace.record(
+                -1, "lm_head.logits", logits.next_token_logits, last_token_only=True
+            )
+            trace.finish()
+        return logits
 
     def post_load_weights(self, weight_names=None):
         # Perform post-processing after loading weights
