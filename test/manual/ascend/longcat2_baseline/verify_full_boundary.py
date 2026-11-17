@@ -170,7 +170,7 @@ def main():
                             axes = trace.layout(layer, point)
                             is_logits = point == "lm_head.logits"
                             size = (
-                                1
+                                (padded[dp] if mode == "DECODE" else 1)
                                 if is_logits
                                 else sum(padded)
                                 if not axes

@@ -200,11 +200,22 @@ class FullBoundaryTrace(probe.FixedTrace):
             f"Unsupported boundary object {key}: {type(tensor)}",
         )
         if point == "lm_head.logits":
+            # DP LM head preserves local decode padding; the sampler consumes
+            # the first live request row. Prefill has already pruned to one row.
+            expected_rows = {1}
+            if self.mode == "DECODE":
+                expected_rows.add(self.counts[self.context["dp"]])
             probe.need(
-                last_token_only and tensor.shape[0] == 1,
-                "Expected one request's full logits",
+                last_token_only and tensor.shape[0] in expected_rows,
+                f"Unexpected request logits rows: {tensor.shape[0]}, "
+                f"expected {sorted(expected_rows)} in {self.mode}",
             )
-            physical, logical, live, padding = [0], [self.n - 1], 1, 0
+            physical, logical, live, padding = (
+                [0],
+                [self.n - 1],
+                1,
+                tensor.shape[0] - 1,
+            )
         else:
             physical, logical, live, padding = probe.select_rows(
                 axes,
