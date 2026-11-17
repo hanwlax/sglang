@@ -186,8 +186,8 @@ The last mode supports Attention stages a_proj, norm_qb, qk_bmm, rope, sparse,
 and tail. It does not expose every MoE/dense-FFN GEMM operand, and the FP8 quantizer
 operands/weights needed for a complete CPU replay are not all present. Default
 internal ranks are0/16/32/48 (only four local heads per selected Attention rank).
-The full-boundary and legacy-internal hooks are currently mutually exclusive;
-setting LC_INTERNAL_LAYERS=all on a full-boundary runtime does not enable them.
+Internal hooks require the explicit generation flag described below;
+setting LC_INTERNAL_LAYERS=all alone does not install them in a full-boundary runtime.
 
 See [CAPTURE_STEPS_ZH.md](CAPTURE_STEPS_ZH.md) for source checkout, per-host build,
 launch, replay and evidence-file collection commands.
@@ -211,3 +211,37 @@ still includes the router, MoE and dense FFN points described above.
 The runtime receipt records whether internal hooks were installed. Regenerate
 the private runtime and restart after changing this flag; editing only the outer
 helper cannot enable hooks in an existing runtime.
+
+## Eliza fixed input and real routing
+
+`fixtures/eliza_853.json` freezes GSM8K test row9 after the original five shots,
+using the same SGLang tokenizer loader as the A3 service. Its prompt has853 IDs
+and SHA256 `1b8d40fb3f004235b35182563c4883cb4ef8ce14bf6f7ff55484afe8e262196c`.
+The explicit11-token comparison prefix is ` Eliza earns 40 * 10 = `.
+This was selected after an A5 response showed arithmetic corruption and repeated
+text zeros; it is not a recovered original failing output-ID sequence. Do not
+re-tokenize mojibake copied from an HTML viewer. The fixture records UTF-8 text,
+dataset hash/row, tokenizer file hashes and both complete ID hashes.
+
+```bash
+python3 replay_fixed_decode_dp4.py --topology a3-dp4 \
+  --fixture fixtures/eliza_853.json --url http://192.168.25.209:10096 \
+  --dps 0 --lengths 1 11 --repeat 2 --timeout 3000 --out /absolute/new/eliza_client
+```
+
+Length1 targets the second output token; length11 consumes the complete frozen
+prefix and samples the following token. This is aligned computation, not a
+promise to reproduce a free-generation loop. The existing `--control` input
+retains its852-token hash guard. Custom fixtures require full SHA256 validation
+and cannot be combined with a prefix override. `make_gsm8k_fixed_fixture.py`
+rebuilds fixtures from the frozen dataset and actual model tokenizer.
+
+The collector does not force experts, replace routing weights, or run alternate
+operator implementations. It preserves raw router logits, global selected IDs
+and scaled routing weights before Identity rewriting, then dispatch IDs/weights
+after rewriting. `moe.reduced` is the ordinary expert branch after its declared
+sum; `moe.branch_output` additionally includes Identity. Residuals are separate
+from pending layer contributions. Compare aligned layer/MoE inputs first, then
+logits and routing, then merged outputs. Once selected experts differ, output
+differences include routing changes and cannot alone diagnose an expert kernel.
+Remote expert-internal tensors remain outside this capture's coverage.

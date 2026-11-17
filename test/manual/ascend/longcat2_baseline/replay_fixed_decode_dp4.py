@@ -10,30 +10,84 @@ import uuid
 from pathlib import Path
 
 
+def ids_hash(ids):
+    return hashlib.sha256(json.dumps(ids).encode()).hexdigest()
+
+
+def load_inputs(control, fixture, prefix_override):
+    if fixture is not None:
+        data = json.loads(fixture.read_text())
+        if data.get("schema") != "longcat_fixed_input_v1":
+            raise ValueError("Unsupported fixed-input fixture schema")
+        for key in ("prompt_ids", "prefix_ids"):
+            values = data[key]
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(type(v) is not int or v < 0 for v in values)
+            ):
+                raise ValueError(f"Invalid {key}")
+            if ids_hash(values) != data[key + "_sha256"]:
+                raise ValueError(f"Fixture hash mismatch: {key}")
+        if prefix_override is not None:
+            raise ValueError("Fixture owns prefix IDs; do not override them")
+        return (
+            data["prompt_ids"],
+            data["prefix_ids"],
+            {
+                "name": data["name"],
+                "path": str(fixture),
+                "file_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                "prompt_ids_sha256": data["prompt_ids_sha256"],
+                "prefix_ids_sha256": data["prefix_ids_sha256"],
+                "provenance": data.get("provenance"),
+            },
+        )
+    ids = json.loads(control.read_text())["response"]["choices"][0]["prompt_token_ids"]
+    if len(ids) != 852 or ids_hash(ids)[:12] != "07bd4107b296":
+        raise ValueError("Control prompt must match the saved 852-token prompt")
+    prefix = [
+        int(x)
+        for x in (prefix_override or "70115,838,15200,11683,597,444,241,239").split(",")
+    ]
+    if any(v < 0 for v in prefix):
+        raise ValueError("Prefix IDs must be nonnegative")
+    return (
+        ids,
+        prefix,
+        {
+            "name": "Control",
+            "path": str(control),
+            "prompt_ids_sha256": ids_hash(ids),
+            "prefix_ids_sha256": ids_hash(prefix),
+        },
+    )
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--control", type=Path, required=True)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--control", type=Path)
+    source.add_argument(
+        "--fixture", type=Path, help="Versioned prompt/prefix IDs with full SHA256"
+    )
     p.add_argument("--url", default="http://127.0.0.1:10096")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--repeat", type=int, default=2)
     p.add_argument("--lengths", type=int, nargs="+", default=[1])
     p.add_argument("--dps", type=int, nargs="+", default=None)
-    p.add_argument("--prefix-ids", default="70115,838,15200,11683,597,444,241,239")
+    p.add_argument(
+        "--prefix-ids", help="Legacy Control prefix override; fixtures own their prefix"
+    )
     p.add_argument("--timeout", type=float, default=600)
     p.add_argument("--topology", choices=("a3-dp4", "a5-dp2"), default="a3-dp4")
     args = p.parse_args()
     dp_size = 2 if args.topology == "a5-dp2" else 4
     if args.dps is None:
         args.dps = list(range(dp_size))
-    ids = json.loads(args.control.read_text())["response"]["choices"][0][
-        "prompt_token_ids"
-    ]
-    if (
-        len(ids) != 852
-        or hashlib.sha256(json.dumps(ids).encode()).hexdigest()[:12] != "07bd4107b296"
-    ):
-        raise ValueError("Control prompt must match the saved 852-token prompt")
-    prefix = [int(x) for x in args.prefix_ids.split(",")]
+    ids, prefix, input_receipt = load_inputs(
+        args.control, args.fixture, args.prefix_ids
+    )
     if args.repeat < 2 or any(n < 1 or n > len(prefix) for n in args.lengths):
         raise ValueError("Need repeat>=2 and valid prefix lengths")
     if len(set(args.lengths)) != len(args.lengths):
@@ -59,6 +113,7 @@ def main():
         },
         "dps": args.dps,
         "lengths": args.lengths,
+        "input_fixture": input_receipt,
         "prompt_ids": ids,
         "prefix_ids": prefix,
         "requests": [],
