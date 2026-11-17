@@ -100,3 +100,12 @@ receipts now hash diagnostic helpers and the full-capture profile as well.
 modified sources must be copied into a new bundle and runtimes regenerated.
 
 Generated probes now live under `python/sglang/srt/debug_utils/` and use fully qualified imports. A same-named helper in the launch working directory cannot override the private runtime copy.
+
+## Uneven cold checkpoint loading
+
+`--load-barrier-timeout 3600` optionally increases only the post-weight-load
+monitored barrier from the upstream 480 seconds. It applies to eval and trace
+runtimes, is recorded in the receipt together with the changed source hash, and
+does not change model arithmetic or the evaluator. Omit it to preserve the
+upstream timeout. Rebuild private runtimes after selecting it. This was added
+after A3 DP0 completed loading while other hosts were still reading safetensors.

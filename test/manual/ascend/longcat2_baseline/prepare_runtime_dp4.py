@@ -14,9 +14,12 @@ p.add_argument('--source', default='/home/hanwlax/workspace/sglang')
 p.add_argument('--mode', choices=('eval', 'trace'), required=True)
 p.add_argument('--out', type=Path, required=True)
 p.add_argument('--full-boundary-layers', type=int, nargs='+', help='Save all live rows/all columns of selected blocks (full 38-layer model)')
+p.add_argument('--load-barrier-timeout', type=int, help='Startup-only wait in seconds for uneven checkpoint loading')
 p.add_argument('--with-internal-attention', action='store_true', help='Also install internal Attention hooks; LC_INTERNAL_LAYERS/RANKS select captures')
 p.add_argument('--trace-topology', choices=('a3-dp4', 'a5-dp2'), default='a3-dp4')
 a = p.parse_args()
+if a.load_barrier_timeout is not None and a.load_barrier_timeout <= 0:
+    p.error('--load-barrier-timeout must be positive')
 if a.with_internal_attention and a.mode != 'trace':
     p.error('--with-internal-attention requires trace mode')
 if a.full_boundary_layers is not None:
@@ -102,6 +105,11 @@ def backend(s):
         'query_lengths=actual_seq_qlen, kv_lengths=actual_seq_lengths_kv, scale=layer.scaling, output=attn_out)\n' + anchor)
     return s[:start] + t + s[end:]
 
+if a.load_barrier_timeout is not None:
+    edit('model_executor/model_runner_components/load_model_utils.py',
+         lambda s: replace(s, 'UNBALANCED_MODEL_LOADING_TIMEOUT_S = 480',
+                           f'UNBALANCED_MODEL_LOADING_TIMEOUT_S = {a.load_barrier_timeout}'))
+
 if a.mode == 'trace':
     edit('managers/tp_worker.py', worker)
     edit('models/longcat_flash.py', model)
@@ -139,11 +147,13 @@ paths = [root / r for r in ('managers/tp_worker.py', 'models/longcat_flash.py',
     'hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py',
     'hardware_backend/npu/attention/ascend_backend.py')]
 paths.append(a.out / 'run_eval_to_dir.py')
+if a.load_barrier_timeout is not None:
+    paths.append(root / 'model_executor/model_runner_components/load_model_utils.py')
 if a.mode == 'trace':
     paths += [root / 'debug_utils' / name for name in ('longcat_fixed_decode_dp4.py', 'capture_internal_dp4.py')]
 if a.full_boundary_layers is not None:
     paths += [root / 'debug_utils/longcat_full_boundary.py', root / 'debug_utils/longcat_capture_profile.json']
-receipt = {'mode': a.mode, 'topology': {'tp_size':16*dp_size, 'attn_dp_size':dp_size, 'moe_ep_size':16*dp_size}, 'capture': 'full_valid_boundaries' if a.full_boundary_layers is not None else 'legacy', 'internal_attention': a.mode == 'trace' and (a.full_boundary_layers is None or a.with_internal_attention), 'revision': REV, 'source': a.source, 'runtime': str(a.out.resolve()),
+receipt = {'mode': a.mode, 'load_barrier_timeout': a.load_barrier_timeout, 'topology': {'tp_size':16*dp_size, 'attn_dp_size':dp_size, 'moe_ep_size':16*dp_size}, 'capture': 'full_valid_boundaries' if a.full_boundary_layers is not None else 'legacy', 'internal_attention': a.mode == 'trace' and (a.full_boundary_layers is None or a.with_internal_attention), 'revision': REV, 'source': a.source, 'runtime': str(a.out.resolve()),
            'sha256': {str(f.relative_to(a.out)): hashlib.sha256(f.read_bytes()).hexdigest() for f in paths}}
 (a.out / 'receipt.json').write_text(json.dumps(receipt, indent=2))
 print(json.dumps(receipt, indent=2))
