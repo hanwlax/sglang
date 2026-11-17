@@ -88,3 +88,15 @@ This tooling is A3 DP4-specific. A5 needs TP32/DP2/EP32 routing, receipts, row m
 and FP8/model/network settings adapted together; changing only --tp-size is insufficient.
 Cross-platform numerical comparison of internal dumps is a next step, not a feature
 of the same-platform repeat comparator in this directory.
+
+## Opt-in full boundary capture
+
+See [FULL_BOUNDARIES.md](FULL_BOUNDARIES.md). `--full-boundary-layers 0 1`
+adds schema5 per-stage full valid tensors and consumer residual observations;
+`--trace-topology a5-dp2` generates the separate TP32/DP2/EP32 capture profile.
+The original DP4 sampled mode and normal eval mode remain available. Generated
+receipts now hash diagnostic helpers and the full-capture profile as well.
+`deployment_manifest.json` is the historical 813ffa48f884 deployment receipt;
+modified sources must be copied into a new bundle and runtimes regenerated.
+
+Generated probes now live under `python/sglang/srt/debug_utils/` and use fully qualified imports. A same-named helper in the launch working directory cannot override the private runtime copy.

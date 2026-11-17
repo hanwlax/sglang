@@ -157,3 +157,11 @@ consistently and distinguish A3/A5 differences from actual-input CPU operator er
 Preparation and CPU tests are complete only when `verify_dp4.py` passes on the target
 container. NPU startup, actual64-rank capture, DeepEP behavior and GSM8K remain untested
 until those commands are executed on free devices.
+
+## Full valid tensors for blocks 0 and 1
+
+For complete element data in a full38-layer model, use the new opt-in mode described
+in [FULL_BOUNDARIES.md](FULL_BOUNDARIES.md). It supports distinct A3 DP4 and A5 DP2
+capture profiles, all valid rows/all columns, per-stage CPU files, and explicit
+residual/partition metadata. It does not use the schema4 repeat comparator or
+certify NPU behavior. The new `run_a5_full_boundary.sh` is a capture-only DP2 launcher; it has CPU dry-run coverage, not A5 runtime validation. Run `verify_full_boundary.py` before use.

@@ -17,10 +17,14 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--repeat", type=int, default=2)
     p.add_argument("--lengths", type=int, nargs="+", default=[1])
-    p.add_argument("--dps", type=int, nargs="+", default=[0, 1, 2, 3])
+    p.add_argument("--dps", type=int, nargs="+", default=None)
     p.add_argument("--prefix-ids", default="70115,838,15200,11683,597,444,241,239")
     p.add_argument("--timeout", type=float, default=600)
+    p.add_argument("--topology", choices=("a3-dp4", "a5-dp2"), default="a3-dp4")
     args = p.parse_args()
+    dp_size = 2 if args.topology == "a5-dp2" else 4
+    if args.dps is None:
+        args.dps = list(range(dp_size))
     ids = json.loads(args.control.read_text())["response"]["choices"][0][
         "prompt_token_ids"
     ]
@@ -37,9 +41,9 @@ def main():
     if (
         not args.dps
         or len(set(args.dps)) != len(args.dps)
-        or any(d not in (0, 1, 2, 3) for d in args.dps)
+        or any(d not in range(dp_size) for d in args.dps)
     ):
-        raise ValueError("--dps must select distinct DP0/DP1/DP2/DP3")
+        raise ValueError(f"--dps must select distinct ranks in 0..{dp_size - 1}")
     args.out.mkdir(parents=True, exist_ok=False)
     client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     run = uuid.uuid4().hex[:12]
@@ -47,7 +51,12 @@ def main():
         "run": run,
         "repeat": args.repeat,
         "schema": 4,
-        "topology": {"tp_size": 64, "attn_dp_size": 4, "attn_tp_size": 16, "moe_ep_size": 64},
+        "topology": {
+            "tp_size": 16 * dp_size,
+            "attn_dp_size": dp_size,
+            "attn_tp_size": 16,
+            "moe_ep_size": 16 * dp_size,
+        },
         "dps": args.dps,
         "lengths": args.lengths,
         "prompt_ids": ids,
@@ -62,7 +71,7 @@ def main():
             forced = prefix[length - 1]
             # One explicit warm-up per prefix, excluded from repeat comparisons.
             for rep in range(args.repeat + 1):
-                rid = f"lcfix4-{run}-d{dp}-p{len(prompt)}-t{forced}-r{rep}"
+                rid = f"lcfix{dp_size}-{run}-d{dp}-p{len(prompt)}-t{forced}-r{rep}"
                 item = {
                     "rid": rid,
                     "dp": dp,

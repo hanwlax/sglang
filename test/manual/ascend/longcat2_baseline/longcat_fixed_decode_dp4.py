@@ -14,7 +14,14 @@ import torch
 
 _active = None
 _worker_written = False
-_PATTERN = re.compile(r"lcfix4-([0-9a-f]{12})-d([0-3])-p(\d+)-t(\d+)-r(\d+)")
+_PROFILE_PATH = Path(__file__).with_name("longcat_capture_profile.json")
+CAPTURE_PROFILE = (
+    json.loads(_PROFILE_PATH.read_text()) if _PROFILE_PATH.exists() else None
+)
+DP_SIZE = CAPTURE_PROFILE["attn_dp_size"] if CAPTURE_PROFILE else 4
+_PATTERN = re.compile(
+    rf"lcfix{DP_SIZE}-([0-9a-f]{{12}})-d([0-9]+)-p(\d+)-t(\d+)-r(\d+)"
+)
 
 
 def need(ok, message):
@@ -50,23 +57,26 @@ def topology():
             p.attn_cp_size,
             p.pp_size,
         )
-        == (64, 4, 16, 64, 1, 1),
-        "Expected TP64/ADP4/ATP16/EP64/CP1/PP1",
+        == (16 * DP_SIZE, DP_SIZE, 16, 16 * DP_SIZE, 1, 1),
+        f"Expected TP{16 * DP_SIZE}/ADP{DP_SIZE}/ATP16/EP{16 * DP_SIZE}/CP1/PP1",
     )
-    need(p.moe_tp_size == p.moe_dp_size == 1, "Expected full-width experts with MoE TP1/DP1")
+    need(
+        p.moe_tp_size == p.moe_dp_size == 1,
+        "Expected full-width experts with MoE TP1/DP1",
+    )
     need(p.tp_rank == p.attn_dp_rank * 16 + p.attn_tp_rank, "Unexpected rank mapping")
     return result
 
 
 def request(batch):
     reqs = getattr(batch, "reqs", ()) if batch is not None else ()
-    tagged = [r for r in reqs if str(r.rid).startswith("lcfix4-")]
+    tagged = [r for r in reqs if str(r.rid).startswith("lcfix")]
     if not tagged:
         return None
     need(len(reqs) == len(tagged) == 1, "Probe requires one isolated request")
     rid = str(tagged[0].rid)
     m = _PATTERN.fullmatch(rid)
-    need(m is not None, "Invalid lcfix4 RID")
+    need(m is not None and int(m[2]) < DP_SIZE, "RID does not match runtime DP profile")
     return {
         "rid": rid,
         "dp": int(m[2]),
@@ -99,7 +109,7 @@ def bind_fixed_decode(batch, forward_batch, *, speculative):
     mode = forward_batch.forward_mode.name
     n = _active["prompt_len"] if mode == "EXTEND" else 1
     raw_counts = [int(x) for x in forward_batch.global_num_tokens_cpu]
-    expected = [0] * 4
+    expected = [0] * DP_SIZE
     expected[_active["dp"]] = n
     need(
         raw_counts == expected,
@@ -108,13 +118,25 @@ def bind_fixed_decode(batch, forward_batch, *, speculative):
     _active.update(mode=mode, saved=False, raw_counts=raw_counts, topology=info)
 
 
-def select_rows(axes, counts, dp, local_rank, real_n, physical_n):
+def select_rows(
+    axes, counts, dp, local_rank, real_n, physical_n, *, dp_size=4, full=False
+):
     """Map contiguous row domains used by layer_boundary.ops.move_rows.
 
     Return physical indices, logical request indices, real-row count and pad count.
     Only DP-local, global DP-gathered, and DP-local ATP-split layouts are supported.
     """
-    need(len(counts) == 4 and 0 <= dp < 4 and 0 <= local_rank < 16, "Invalid DP4 row metadata")
+    need(
+        dp_size in (2, 4)
+        and len(counts) == dp_size
+        and 0 <= dp < dp_size
+        and 0 <= local_rank < 16,
+        "Invalid DP row metadata",
+    )
+    need(
+        all(n >= 0 for n in counts) and 0 <= real_n <= counts[dp],
+        "Invalid live row count",
+    )
     axes = frozenset(axes)
     need(
         axes
@@ -143,7 +165,15 @@ def select_rows(axes, counts, dp, local_rank, real_n, physical_n):
         f"Row shape mismatch: axes={sorted(axes)} expected={expected_n} actual={physical_n}",
     )
     live = max(0, end - start)
-    logical = [] if not live else sorted({start, start + live // 2, end - 1})
+    logical = (
+        (
+            list(range(start, end))
+            if full
+            else sorted({start, start + live // 2, end - 1})
+        )
+        if live
+        else []
+    )
     return [base + i for i in logical], logical, live, physical_n - live
 
 
@@ -162,7 +192,7 @@ class FixedTrace:
         self.counts = [int(x) for x in batch.global_num_tokens_cpu]
         dp = self.context["dp"]
         need(
-            len(self.counts) == 4 and self.counts[dp] >= self.n,
+            len(self.counts) == DP_SIZE and self.counts[dp] >= self.n,
             "Invalid padded DP counts",
         )
         self.samples = []
@@ -310,6 +340,10 @@ class FixedTrace:
 def make_fixed_trace(input_ids, positions, forward_batch, model):
     if _active is None:
         return None
+    if CAPTURE_PROFILE:
+        from longcat_full_boundary import FullBoundaryTrace
+
+        return FullBoundaryTrace(input_ids, positions, forward_batch, model)
     return FixedTrace(input_ids, positions, forward_batch, model)
 
 
