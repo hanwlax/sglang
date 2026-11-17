@@ -2,8 +2,10 @@
 
 This directory is the source of the A3 full-layer TP64 / attention-DP4 / EP64
 baseline deployed on 2026-11-17. Read README.md for launch/evaluation/capture commands.
-The baseline has passed CPU synthetic checks and argument dry-runs, not an actual
-64-rank NPU startup or GSM8K evaluation.
+The 2026-11-17 full A3 AI_CPU baseline completed GSM8K 183/200 (0.915), with
+full38 boundary captures and internal blocks0/7/37 for two Eliza prefixes.
+A5 full-FP8 runtime execution remains to be validated in the green zone. See
+[A5_ELIZA_FULL_CAPTURE_ZH.md](A5_ELIZA_FULL_CAPTURE_ZH.md) for the new paired workflow.
 
 ## What is versioned
 

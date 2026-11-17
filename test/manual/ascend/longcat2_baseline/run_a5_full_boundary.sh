@@ -19,7 +19,10 @@ CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-2048}
 MAX_TOTAL_TOKENS=${MAX_TOTAL_TOKENS:-8192}
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-0.92}
 CONTEXT_LENGTH=${CONTEXT_LENGTH:-8192}
-RUN_DIR="$base/results/$run_id"
+CAPTURE_ROOT=${CAPTURE_ROOT:-$base}
+RUN_DIR="$CAPTURE_ROOT/results/$run_id"
+export LC_INTERNAL_LAYERS=${LC_INTERNAL_LAYERS:-0,7,37}
+export LC_INTERNAL_RANKS=${LC_INTERNAL_RANKS:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}
 export LONGCAT_FIXED_DECODE_DIR="$RUN_DIR/dumps"
 [[ "$CHUNKED_PREFILL_SIZE" -ge 2048 ]] || { echo 'Fixed-prefix trace requires global chunk >=2048' >&2; exit 2; }
 # TP32 uses eight logical A5 devices on each host.
@@ -121,5 +124,6 @@ with Path(p).open('x') as f:
                'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
                'env':{k:v for k,v in os.environ.items() if k.startswith(('SGLANG_','HCCL_','DEEPEP_','MOE_','LC_','ASCEND_RT_VISIBLE'))}},f,indent=2)
 PY
+  cp "$RUNTIME/receipt.json" "$RUN_DIR/runtime_rank${node_rank}.json"
   python3 -m sglang.launch_server "${args[@]}"
 } 2>&1 | tee -a "$log"

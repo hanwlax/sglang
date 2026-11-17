@@ -1,5 +1,8 @@
 # A3 full-layer numerical baseline — TP64 / attention DP4 / EP64
 
+A5 full38 Eliza collection: see [A5_ELIZA_FULL_CAPTURE_ZH.md](A5_ELIZA_FULL_CAPTURE_ZH.md)
+for the matching FP8/DP2 launch, replay and full-payload verification.
+
 Updated 2026-11-17. Run inside `hanwlax-longcat2.0` on blue hosts
 209,212,216,217 (node ranks0,1,2,3) in:
 `/home/hanwlax/workspace/progress/longcat2.0/a3_full_baseline_20261117`.

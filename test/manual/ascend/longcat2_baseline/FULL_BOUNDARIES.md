@@ -1,5 +1,9 @@
 # Full valid boundary tensors: A3 DP4 / A5 DP2
 
+For the full38 Eliza pairing with internal blocks0/7/37, use
+[A5_ELIZA_FULL_CAPTURE_ZH.md](A5_ELIZA_FULL_CAPTURE_ZH.md). The two-block examples
+below remain supported and describe a smaller capture selection, not a cut model.
+
 This opt-in schema-5 capture runs the **complete 38-block model** and saves all
 valid rows and all trailing columns of blocks 0 and 1. It does not truncate the
 model, change its arithmetic, or establish baseline accuracy. Establish A3's

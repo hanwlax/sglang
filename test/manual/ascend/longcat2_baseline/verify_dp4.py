@@ -134,6 +134,7 @@ with tempfile.TemporaryDirectory(prefix='lc-dp4-verify-') as tmp:
 good=dict(tp_size=64,attn_dp_size=4,ep_size=64,moe_a2a_backend='deepep',deepep_mode='auto',
           cuda_graph_backend_prefill='disabled',cuda_graph_backend_decode='disabled',
           speculative_algorithm=None,json_model_override_args='{}',chunked_prefill_size=1024)
+good['disable_radix_cache'] = True
 validate(good,True)
 fails(lambda:validate({**good,'ep_size':32}))
 fails(lambda:validate({**good,'speculative_algorithm':'NEXTN'}))
