@@ -1,5 +1,7 @@
 # LongCat A3 / 950DT：两层模型固定路由与完整张量逐元素对照
 
+**2026-11-17 A3 实测参考已准备：** 自然路由与固定路由两轮的 416 对完整张量逐元素全部相等。直接使用本次数据在绿区采集，请按 [950DT 启动、重放、数据校验与逐元素对比命令](green_route_20261117/README.md) 执行。代码、493 KiB 路由参考和固定输入通过 Git 获取；完整 A3 张量数据另走 eTrans。下面保留通用四组实验流程。
+
 ## 实验范围与代码分支
 
 使用 [hanwlax/sglang 的 `codex/longcat2-route-lock-full` 分支](https://github.com/hanwlax/sglang/tree/codex/longcat2-route-lock-full)。该分支基于原采集版本 `c0e9d9a0cc6b1a37e41677faf0c961fedc668af7`，已接入路由探针和完整张量采集，**不再需要手改源码或从交付目录复制探针**。
