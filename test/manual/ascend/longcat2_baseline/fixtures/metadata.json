@@ -1,0 +1,15 @@
+{
+  "source": "blue 216 container /tmp/longcat-control.json; token IDs only",
+  "prompt_tokens": 852,
+  "prompt_ids_sha256_json_default": "07bd4107b296a321e955d5a8f275b6b27e97d104a47ffe78b48dbd2953e4b562",
+  "prefix_ids": [
+    70115,
+    838,
+    15200,
+    11683,
+    597,
+    444,
+    241,
+    239
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "source_revision": "c0e9d9a0cc6b1a37e41677faf0c961fedc668af7",
+  "deployed_date": "2026-11-17",
+  "hosts": [
+    "209",
+    "212",
+    "216",
+    "217"
+  ],
+  "container": "hanwlax-longcat2.0",
+  "deployment_dir": "/home/hanwlax/workspace/progress/longcat2.0/a3_full_baseline_20261117",
+  "sha256": {
+    "README.md": "61915f071cb9f4b2a0542afebde1ca3b9ebf0c16a756a5265c2fe950b3f37c51",
+    "audit_model.py": "a44f9276239aa93fea75a5af08ae21ad77efa6ade4383559bdb7ae7b00a62d65",
+    "capture_internal_dp4.py": "afe9fb63d9cb76177267b3267602d14f77c6fca9855ebfd329328bd1fdb557da",
+    "check_server_dp4.py": "db42d12eb58d05ea8fa671224507cdc7b9b49878e72b60a5a266a949c0bb1c23",
+    "compare_fixed_decode_dp4.py": "0658694709fdc969687123150fe8af22f36b1f0e8f233376f91ca51fc6cb1533",
+    "longcat_fixed_decode_dp4.py": "2737c9f5f74d8edc0f9b443b43f8c03224c3cb0f98fcfdb1b471c55650cd69f7",
+    "prepare_runtime_dp4.py": "a4acc9a77b71bb35aa4231e2c99ca861049092960939416160f9505510f27267",
+    "replay_fixed_decode_dp4.py": "2c10affab46e9de4d67a73163c50200875dab45fef47d63c64a6c36ec8f48e57",
+    "run_a3_full_baseline.sh": "f6be7475d9bdd76307382a049cfeaede8a7d46b8b037cc92bd25acbc55a9ba7c",
+    "run_fixed_prefix_dp4.sh": "1642ef25e10d4da32ffaa3078a0c0734e281068d5449d121ee6e9f78489a99cd",
+    "run_gsm8k.sh": "ea0938a3f92977fe4ab82739c950e04696e209f6d662c874707d6818adaed449",
+    "verify_dp4.py": "e517ac84319968b14ae0cfef499922cfa232ff6a309d11b0c2fbcd24fb7fa4f3"
+  },
+  "validation": "CPU synthetic checks and dry-run passed on four hosts; NPU startup, GSM8K and actual 64-rank captures not run"
+}
