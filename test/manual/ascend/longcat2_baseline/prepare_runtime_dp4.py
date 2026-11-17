@@ -14,8 +14,11 @@ p.add_argument('--source', default='/home/hanwlax/workspace/sglang')
 p.add_argument('--mode', choices=('eval', 'trace'), required=True)
 p.add_argument('--out', type=Path, required=True)
 p.add_argument('--full-boundary-layers', type=int, nargs='+', help='Save all live rows/all columns of selected blocks (full 38-layer model)')
+p.add_argument('--with-internal-attention', action='store_true', help='Also install internal Attention hooks; LC_INTERNAL_LAYERS/RANKS select captures')
 p.add_argument('--trace-topology', choices=('a3-dp4', 'a5-dp2'), default='a3-dp4')
 a = p.parse_args()
+if a.with_internal_attention and a.mode != 'trace':
+    p.error('--with-internal-attention requires trace mode')
 if a.full_boundary_layers is not None:
     if a.mode != 'trace' or not a.full_boundary_layers or len(set(a.full_boundary_layers)) != len(a.full_boundary_layers) or any(l < 0 or l >= 38 for l in a.full_boundary_layers):
         p.error('Full boundaries require trace mode and distinct block IDs 0..37')
@@ -102,8 +105,8 @@ def backend(s):
 if a.mode == 'trace':
     edit('managers/tp_worker.py', worker)
     edit('models/longcat_flash.py', model)
-    # Full-boundary mode is intentionally boundary-only; no large physical-cache dumps.
-    if a.full_boundary_layers is None:
+    # Physical-cache/internal hooks are opt-in with full boundaries.
+    if a.full_boundary_layers is None or a.with_internal_attention:
         edit('hardware_backend/npu/modules/deepseek_v2_attention_mla_npu.py', attention)
         edit('hardware_backend/npu/attention/ascend_backend.py', backend)
     # Fully qualified imports prevent a same-named bundle helper in cwd from
@@ -140,7 +143,7 @@ if a.mode == 'trace':
     paths += [root / 'debug_utils' / name for name in ('longcat_fixed_decode_dp4.py', 'capture_internal_dp4.py')]
 if a.full_boundary_layers is not None:
     paths += [root / 'debug_utils/longcat_full_boundary.py', root / 'debug_utils/longcat_capture_profile.json']
-receipt = {'mode': a.mode, 'topology': {'tp_size':16*dp_size, 'attn_dp_size':dp_size, 'moe_ep_size':16*dp_size}, 'capture': 'full_valid_boundaries' if a.full_boundary_layers is not None else 'legacy', 'revision': REV, 'source': a.source, 'runtime': str(a.out.resolve()),
+receipt = {'mode': a.mode, 'topology': {'tp_size':16*dp_size, 'attn_dp_size':dp_size, 'moe_ep_size':16*dp_size}, 'capture': 'full_valid_boundaries' if a.full_boundary_layers is not None else 'legacy', 'internal_attention': a.mode == 'trace' and (a.full_boundary_layers is None or a.with_internal_attention), 'revision': REV, 'source': a.source, 'runtime': str(a.out.resolve()),
            'sha256': {str(f.relative_to(a.out)): hashlib.sha256(f.read_bytes()).hexdigest() for f in paths}}
 (a.out / 'receipt.json').write_text(json.dumps(receipt, indent=2))
 print(json.dumps(receipt, indent=2))

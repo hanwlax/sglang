@@ -41,7 +41,7 @@ contribution, not the complete residual hidden state. Identity zero is legal;
 `no_live_rows` is different from zero-valued activations. Indexer sentinel/padded
 slots and integer IDs require semantic checks, not floating L2 comparisons.
 
-Full mode does **not** install the old internal Attention/cache hooks: this task
+By default full mode does **not** install the old internal Attention/cache hooks: this task
 captures boundaries, not every intermediate operator or FP8 operand. It does not
 record remote expert-internal tensors. Do not sum origin-group MoE samples as an
 all-EP reduction oracle. A3/A5 dense-FFN local contributions have different TP
@@ -191,3 +191,23 @@ setting LC_INTERNAL_LAYERS=all on a full-boundary runtime does not enable them.
 
 See [CAPTURE_STEPS_ZH.md](CAPTURE_STEPS_ZH.md) for source checkout, per-host build,
 launch, replay and evidence-file collection commands.
+
+## Full 38-block capture plus selected Attention internals
+
+To collect both in the same forwards, add `--with-internal-attention` when
+generating the trace runtime. Select every boundary block with
+`--full-boundary-layers $(seq 0 37)`, and launch with
+`LC_INTERNAL_LAYERS=0,7,37 LC_INTERNAL_RANKS=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15`
+for a DP0 replay. The model still has all 38 blocks. This captures Attention IDs
+0/1, 14/15, and 74/75 on all 16 origin ranks for measured repeat r1, alongside
+the full boundary r1/r2 data. Later repeats intentionally omit the heavy internal
+captures. The six internal stages are `a_proj`, `norm_qb`, `qk_bmm`, `rope`,
+`sparse`, and `tail`; both EXTEND and DECODE are expected. Physical KV cache dumps
+include unused slots: consume only entries selected by the saved indices, block
+tables and sequence lengths. These are Attention internals; remote expert-internal
+GEMM operands and every dense-FFN intermediate are not captured. Boundary data
+still includes the router, MoE and dense FFN points described above.
+
+The runtime receipt records whether internal hooks were installed. Regenerate
+the private runtime and restart after changing this flag; editing only the outer
+helper cannot enable hooks in an existing runtime.
