@@ -340,6 +340,11 @@ class LongcatFlashMoE(nn.Module):
         )
         if _is_npu:
             topk_weights = topk_weights * self.routed_scaling_factor
+            from sglang.srt.debug_utils.longcat_route_lock import apply_route_lock
+
+            topk_weights, topk_idx = apply_route_lock(
+                self, trace, router_logits, topk_weights, topk_idx
+            )
         if trace is not None:
             trace.record(self.layer_id, "router.expert_ids", topk_idx)
             trace.record(self.layer_id, "router.weights", topk_weights)

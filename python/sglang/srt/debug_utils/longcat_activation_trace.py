@@ -49,6 +49,9 @@ class LongCatActivationTrace:
         self.samples = []
 
     def record(self, layer, point, tensor, *, last_token_only=False):
+        from sglang.srt.debug_utils.longcat_route_lock import dump_full_tensor
+
+        dump_full_tensor(self, layer, point, tensor, last_token_only=last_token_only)
         if tensor is None:
             return
         if tensor.shape[0] == self.num_tokens:
