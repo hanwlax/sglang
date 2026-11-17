@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>LongCat 矩阵查看器</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font:
+          15px system-ui,
+          sans-serif;
+        color: #172b45;
+        background: #eef3f8;
+      }
+      body {
+        margin: 0;
+      }
+      main {
+        max-width: 1500px;
+        margin: auto;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 25px;
+        margin: 0 0 6px;
+      }
+      p {
+        line-height: 1.6;
+        margin: 8px 0;
+      }
+      .card {
+        background: white;
+        border: 1px solid #d8e2ed;
+        border-radius: 12px;
+        padding: 18px;
+        margin: 14px 0;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: end;
+      }
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        font-size: 13px;
+        color: #425772;
+      }
+      input,
+      select,
+      button,
+      textarea {
+        font: inherit;
+        border: 1px solid #b9c8d8;
+        border-radius: 6px;
+        padding: 8px;
+        background: white;
+        color: #172b45;
+      }
+      input[type="number"] {
+        width: 92px;
+      }
+      select {
+        max-width: 330px;
+      }
+      button {
+        cursor: pointer;
+        background: #edf4fb;
+      }
+      button.primary {
+        background: #164e87;
+        color: white;
+        border-color: #164e87;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        height: 90px;
+        font:
+          12px ui-monospace,
+          monospace;
+      }
+      .muted {
+        color: #536a83;
+        font-size: 13px;
+      }
+      .error {
+        color: #aa143c;
+        white-space: pre-wrap;
+      }
+      #status {
+        min-height: 24px;
+      }
+      #meta,
+      #stats,
+      #hover {
+        font:
+          13px ui-monospace,
+          monospace;
+        overflow-wrap: anywhere;
+        line-height: 1.7;
+      }
+      #hover {
+        padding: 8px;
+        background: #eef4fa;
+        min-height: 24px;
+      }
+      .heatwrap {
+        overflow: auto;
+        margin-top: 12px;
+      }
+      canvas {
+        display: block;
+        image-rendering: pixelated;
+        max-width: 100%;
+        border: 1px solid #9cabc0;
+        cursor: crosshair;
+      }
+      .legend {
+        max-width: 520px;
+        margin: 12px 0;
+      }
+      .gradient {
+        height: 14px;
+        background: linear-gradient(to right, #2166ac, #f7f7f7, #b2182b);
+      }
+      .legend-labels {
+        display: flex;
+        justify-content: space-between;
+        font:
+          12px ui-monospace,
+          monospace;
+      }
+      .tablewrap {
+        overflow: auto;
+        max-height: 650px;
+        margin-top: 12px;
+      }
+      table {
+        border-collapse: separate;
+        border-spacing: 0;
+        font:
+          13px ui-monospace,
+          monospace;
+      }
+      th,
+      td {
+        padding: 8px 10px;
+        border-right: 1px solid #dde5ef;
+        border-bottom: 1px solid #dde5ef;
+        white-space: nowrap;
+        text-align: right;
+      }
+      thead th {
+        position: sticky;
+        top: 0;
+        background: #e7eef7;
+        z-index: 2;
+      }
+      tbody th {
+        position: sticky;
+        left: 0;
+        background: #e7eef7;
+        z-index: 1;
+      }
+      td:hover {
+        outline: 2px solid #f59e0b;
+        outline-offset: -2px;
+      }
+      .bad {
+        background: #f5d0fe !important;
+        color: #701a75;
+      }
+      .hidden {
+        display: none !important;
+      }
+      details summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .pill {
+        display: inline-block;
+        background: #e4effa;
+        padding: 3px 9px;
+        border-radius: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>LongCat 矩阵查看器 <span id="label" class="pill"></span></h1>
+      <p class="muted">
+        本地 CPU 读取 · 不上传文件 · 不修改张量 · 行列从 0
+        开始。两边使用同一边界、TP、坐标和颜色范围进行对照。
+      </p>
+      <form id="form" class="card">
+        <div class="controls">
+          <label>层<select id="layer"></select></label>
+          <label>采集边界<select id="point"></select></label>
+          <label>TP<select id="tp"></select></label>
+          <label
+            >显示<select id="view">
+              <option value="heatmap">热力图</option>
+              <option value="table">数字表格</option>
+            </select></label
+          >
+        </div>
+        <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0" />
+        <div class="controls">
+          <label
+            >起始矩阵行<input
+              id="row"
+              type="number"
+              min="0"
+              step="1"
+              value="0"
+              required
+          /></label>
+          <label
+            >起始列<input
+              id="col"
+              type="number"
+              min="0"
+              step="1"
+              value="0"
+              required
+          /></label>
+          <label
+            >显示行数<input
+              id="rows"
+              type="number"
+              min="1"
+              step="1"
+              value="16"
+              required
+          /></label>
+          <label
+            >显示列数<input
+              id="cols"
+              type="number"
+              min="1"
+              step="1"
+              value="12"
+              required
+          /></label>
+          <label
+            >颜色下限<input
+              id="vmin"
+              type="number"
+              step="any"
+              value="-1"
+              required
+          /></label>
+          <label
+            >颜色上限<input
+              id="vmax"
+              type="number"
+              step="any"
+              value="1"
+              required
+          /></label>
+          <label
+            >数字格式<select id="format">
+              <option value="exp">科学计数</option>
+              <option value="fixed">小数</option>
+            </select></label
+          >
+          <label
+            >小数位数<input
+              id="digits"
+              type="number"
+              min="0"
+              max="16"
+              value="7"
+              required
+          /></label>
+          <button type="submit" class="primary">显示窗口</button>
+        </div>
+        <div class="controls" style="margin-top: 14px">
+          <button type="button" id="up">↑ 上一页行</button
+          ><button type="button" id="down">↓ 下一页行</button>
+          <button type="button" id="left">← 上一页列</button
+          ><button type="button" id="right">→ 下一页列</button>
+          <button type="button" id="overview">整矩阵热力图</button
+          ><button type="button" id="detail">局部 16×12</button>
+          <button type="button" id="autoscale">按当前窗口调整颜色</button>
+        </div>
+      </form>
+      <section class="card">
+        <div id="status" role="status">正在读取目录…</div>
+        <div id="meta"></div>
+        <div id="stats"></div>
+        <div class="legend">
+          <div class="gradient"></div>
+          <div class="legend-labels">
+            <span id="low"></span><span id="mid"></span><span id="high"></span>
+          </div>
+        </div>
+        <p id="aggregation" class="muted"></p>
+        <p class="muted">
+          颜色范围外的数值显示为端点颜色；紫色表示包含
+          NaN/Inf。整图汇总块使用绝对值最大的有限元素及其符号，不是平均值。
+        </p>
+        <div id="hover">悬停查看坐标；点击热力图进入局部窗口。</div>
+        <div class="heatwrap" id="heatwrap">
+          <canvas id="canvas" width="1" height="1"></canvas>
+        </div>
+        <div class="tablewrap hidden" id="tablewrap"></div>
+      </section>
+      <details class="card" open>
+        <summary>两台电脑对齐视图</summary>
+        <p class="muted">
+          复制下方参数到另一台电脑，点击“应用参数”。不包含张量值或本地文件路径；不会把两台电脑连接起来。
+        </p>
+        <textarea
+          id="parameters"
+          spellcheck="false"
+          aria-label="视图参数"
+        ></textarea>
+        <div class="controls" style="margin-top: 10px">
+          <button id="copy">复制当前参数</button
+          ><button id="apply">应用参数</button
+          ><span id="paramstatus" class="muted"></span>
+        </div>
+      </details>
+    </main>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      let catalog = [],
+        meta = null,
+        current = null,
+        busy = false,
+        selectedId = null;
+      const fields = [
+        "view",
+        "row",
+        "col",
+        "rows",
+        "cols",
+        "vmin",
+        "vmax",
+        "format",
+        "digits",
+      ];
+      async function api(path, params = {}) {
+        const response = await fetch(path + "?" + new URLSearchParams(params));
+        const data = await response.json();
+        if (!response.ok) throw Error(data.error || "读取失败");
+        return data;
+      }
+      function fail(error) {
+        $("status").className = "error";
+        $("status").textContent = error.message;
+      }
+      function setBusy(value) {
+        busy = value;
+        document
+          .querySelectorAll("button,select,input")
+          .forEach((x) => (x.disabled = value));
+        if (value) {
+          $("status").className = "muted";
+          $("status").textContent = "正在读取矩阵窗口…";
+        }
+      }
+      function options(id, values, selected) {
+        const node = $(id);
+        node.replaceChildren();
+        for (const value of values) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent =
+            id === "layer" && Number(value) === -1
+              ? "-1（embedding / final norm / logits）"
+              : value;
+          node.append(option);
+        }
+        if (values.map(String).includes(String(selected)))
+          node.value = String(selected);
+      }
+      function entries() {
+        return catalog.filter(
+          (x) =>
+            String(x.layer) === $("layer").value &&
+            x.point === $("point").value,
+        );
+      }
+      function choosePoints(preferred) {
+        options(
+          "point",
+          [
+            ...new Set(
+              catalog
+                .filter((x) => String(x.layer) === $("layer").value)
+                .map((x) => x.point),
+            ),
+          ].sort(),
+          preferred,
+        );
+        chooseTP(0);
+      }
+      function chooseTP(preferred) {
+        options(
+          "tp",
+          entries()
+            .map((x) => x.tp)
+            .sort((a, b) => a - b),
+          preferred,
+        );
+      }
+      function selected() {
+        const entry = entries().find((x) => String(x.tp) === $("tp").value);
+        if (!entry) throw Error("找不到这个层 / 边界 / TP");
+        return entry;
+      }
+      function settings() {
+        const out = {
+          schema: 1,
+          layer: Number($("layer").value),
+          point: $("point").value,
+          tp: Number($("tp").value),
+        };
+        for (const name of fields)
+          out[name] = ["view", "format"].includes(name)
+            ? $(name).value
+            : Number($(name).value);
+        validate(out);
+        return out;
+      }
+      function validate(s) {
+        for (const name of [
+          "layer",
+          "tp",
+          "row",
+          "col",
+          "rows",
+          "cols",
+          "digits",
+        ])
+          if (!Number.isSafeInteger(s[name])) throw Error(name + " 必须是整数");
+        if (
+          s.row < 0 ||
+          s.col < 0 ||
+          s.rows < 1 ||
+          s.cols < 1 ||
+          s.digits < 0 ||
+          s.digits > 16
+        )
+          throw Error("坐标、窗口大小或数字精度不合法");
+        if (
+          !Number.isFinite(s.vmin) ||
+          !Number.isFinite(s.vmax) ||
+          s.vmin >= s.vmax
+        )
+          throw Error("颜色上下限必须有限，且下限小于上限");
+        if (
+          !["heatmap", "table"].includes(s.view) ||
+          !["exp", "fixed"].includes(s.format)
+        )
+          throw Error("不支持的显示格式");
+      }
+      function color(v, lo, hi) {
+        const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+        const a = t < 0.5 ? [33, 102, 172] : [247, 247, 247],
+          b = t < 0.5 ? [247, 247, 247] : [178, 24, 43],
+          u = t < 0.5 ? t * 2 : (t - 0.5) * 2;
+        return a.map((value, i) => Math.round(value + (b[i] - value) * u));
+      }
+      function format(v, s) {
+        if (typeof v === "string") return v;
+        return s.format === "exp"
+          ? v.toExponential(s.digits)
+          : v.toFixed(s.digits);
+      }
+      function exportSettings() {
+        const text = JSON.stringify(settings());
+        $("parameters").value = text;
+        history.replaceState(null, "", "#" + encodeURIComponent(text));
+        return text;
+      }
+      async function render(adjust = false) {
+        if (busy) return;
+        setBusy(true);
+        try {
+          const s = settings(),
+            entry = selected();
+          if (selectedId !== entry.id) {
+            meta = await api("/api/meta", { id: entry.id });
+            selectedId = entry.id;
+          }
+          if (adjust) {
+            if (s.row >= meta.shape[0]) s.row = 0;
+            if (s.col >= meta.shape[1]) s.col = 0;
+          }
+          const data = await api("/api/window", { id: entry.id, ...s });
+          current = { data, settings: s, id: entry.id };
+          const w = data.window;
+          $("row").value = w.row;
+          $("col").value = w.col;
+          $("rows").value = w.rows;
+          $("cols").value = w.cols;
+          $("meta").textContent =
+            `${entry.file} | shape=[${meta.shape}] | ${meta.dtype} | input_hash=${meta.input_hash ?? "未提供"} | ${meta.mode ?? ""} | route=${meta.route_mode ?? "未提供"}`;
+          const st = data.stats;
+          $("stats").textContent =
+            `矩阵行 ${w.row}–${w.row + w.rows - 1}，列 ${w.col}–${w.col + w.cols - 1} | 元素 ${st.elements} | min=${st.min} max=${st.max} | zero=${st.zeros} NaN=${st.nan} +Inf=${st.posinf} -Inf=${st.neginf}`;
+          $("low").textContent = s.vmin;
+          $("mid").textContent = (s.vmin + s.vmax) / 2;
+          $("high").textContent = s.vmax;
+          $("tablewrap").classList.toggle("hidden", s.view !== "table");
+          $("heatwrap").classList.toggle("hidden", s.view !== "heatmap");
+          $("hover").textContent =
+            "当前窗口已更新。矩阵行是文件内坐标；token 行来自采集元数据。";
+          if (s.view === "heatmap") drawHeatmap(data, s);
+          else drawTable(data, s);
+          $("status").className = "muted";
+          $("status").textContent =
+            `${$("label").textContent} · L${entry.layer} ${entry.point} TP${entry.tp} · 固定颜色 [${s.vmin}, ${s.vmax}]`;
+          exportSettings();
+        } catch (error) {
+          current = null;
+          $("meta").textContent = "";
+          $("stats").textContent = "";
+          $("tablewrap").replaceChildren();
+          $("canvas").width = 1;
+          fail(error);
+        } finally {
+          setBusy(false);
+        }
+      }
+      function drawHeatmap(data, s) {
+        const h = data.values.length,
+          w = data.values[0].length,
+          canvas = $("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d"),
+          pixels = ctx.createImageData(w, h);
+        for (let r = 0; r < h; r++)
+          for (let c = 0; c < w; c++) {
+            const rgb = data.flags[r][c]
+                ? [192, 38, 211]
+                : color(data.values[r][c], s.vmin, s.vmax),
+              i = (r * w + c) * 4;
+            pixels.data.set([...rgb, 255], i);
+          }
+        ctx.putImageData(pixels, 0, 0);
+        const scale = Math.max(1, Math.min(24, 1200 / w, 620 / h));
+        canvas.style.width = w * scale + "px";
+        canvas.style.height = "auto";
+        $("aggregation").textContent = data.aggregated
+          ? `汇总显示：每个色块最多覆盖 ${data.row_step} 行 × ${data.col_step} 列。悬停显示覆盖范围，点击放大后查看原始元素。`
+          : "逐元素显示：每个色块就是一个原始元素，没有汇总。";
+      }
+      function drawTable(data, s) {
+        $("aggregation").textContent =
+          "数字表格：逐元素原值。悬停显示更完整数值，点击单元格固定坐标信息。";
+        const table = document.createElement("table"),
+          head = document.createElement("thead"),
+          hr = document.createElement("tr");
+        const corner = document.createElement("th");
+        corner.textContent = "矩阵行 / token行";
+        hr.append(corner);
+        for (let c = 0; c < data.window.cols; c++) {
+          const th = document.createElement("th");
+          th.textContent = data.window.col + c;
+          hr.append(th);
+        }
+        head.append(hr);
+        table.append(head);
+        const body = document.createElement("tbody");
+        for (let r = 0; r < data.window.rows; r++) {
+          const tr = document.createElement("tr"),
+            th = document.createElement("th"),
+            row = data.window.row + r;
+          th.textContent = `${row} / ${meta.rows[row]}`;
+          tr.append(th);
+          for (let c = 0; c < data.window.cols; c++) {
+            const v = data.values[r][c],
+              td = document.createElement("td"),
+              col = data.window.col + c;
+            td.textContent =
+              Number.isInteger(v) && !meta.dtype.includes("float")
+                ? String(v)
+                : format(v, s);
+            const exact = typeof v === "number" ? v.toPrecision(17) : v;
+            td.title = `矩阵[${row}, ${col}]，token行 ${meta.rows[row]}，值 ${exact}`;
+            if (["NaN", "+Inf", "-Inf"].includes(v)) td.className = "bad";
+            else
+              td.style.backgroundColor = `rgba(${color(Number(v), s.vmin, s.vmax).join(",")},0.22)`;
+            td.onclick = () => {
+              $("hover").textContent = td.title;
+            };
+            tr.append(td);
+          }
+          body.append(tr);
+        }
+        table.append(body);
+        $("tablewrap").replaceChildren(table);
+      }
+      function heatPosition(event) {
+        if (!current || current.settings.view !== "heatmap" || busy)
+          return null;
+        const canvas = $("canvas"),
+          rect = canvas.getBoundingClientRect();
+        const c = Math.min(
+          canvas.width - 1,
+          Math.max(
+            0,
+            Math.floor(
+              ((event.clientX - rect.left) * canvas.width) / rect.width,
+            ),
+          ),
+        );
+        const r = Math.min(
+          canvas.height - 1,
+          Math.max(
+            0,
+            Math.floor(
+              ((event.clientY - rect.top) * canvas.height) / rect.height,
+            ),
+          ),
+        );
+        return { r, c };
+      }
+      $("canvas").onmousemove = (event) => {
+        const p = heatPosition(event);
+        if (!p) return;
+        const d = current.data,
+          w = d.window;
+        const r = w.row + p.r * d.row_step,
+          c = w.col + p.c * d.col_step,
+          re = Math.min(r + d.row_step, w.row + w.rows) - 1,
+          ce = Math.min(c + d.col_step, w.col + w.cols) - 1;
+        const bad = d.flags[p.r][p.c],
+          names = [
+            bad & 1 ? "NaN" : "",
+            bad & 2 ? "+Inf" : "",
+            bad & 4 ? "-Inf" : "",
+          ]
+            .filter(Boolean)
+            .join(",");
+        $("hover").textContent =
+          `矩阵行 ${r}–${re}（token ${meta.rows[r]}–${meta.rows[re]}），列 ${c}–${ce} | ${d.aggregated ? "块内有限代表值" : "值"}=${!d.aggregated && bad ? names : (d.values[p.r][p.c] ?? "无有限值")}${bad ? " | 含 " + names : ""}`;
+      };
+      $("canvas").onclick = (event) => {
+        const p = heatPosition(event);
+        if (!p) return;
+        const d = current.data;
+        $("row").value = d.window.row + p.r * d.row_step;
+        $("col").value = d.window.col + p.c * d.col_step;
+        $("rows").value = 16;
+        $("cols").value = 12;
+        render();
+      };
+      $("form").onsubmit = (event) => {
+        event.preventDefault();
+        render();
+      };
+      $("layer").onchange = () => {
+        choosePoints($("point").value);
+        render(true);
+      };
+      $("point").onchange = () => {
+        chooseTP($("tp").value);
+        render(true);
+      };
+      $("tp").onchange = () => render(true);
+      $("view").onchange = () => render();
+      for (const [id, axis, step] of [
+        ["up", "row", -1],
+        ["down", "row", 1],
+        ["left", "col", -1],
+        ["right", "col", 1],
+      ]) {
+        $(id).onclick = () => {
+          if (!meta) return;
+          const size = meta.shape[axis === "row" ? 0 : 1];
+          $(axis).value = Math.max(
+            0,
+            Math.min(
+              size - 1,
+              Number($(axis).value) +
+                step * Number($(axis === "row" ? "rows" : "cols").value),
+            ),
+          );
+          render();
+        };
+      }
+      $("overview").onclick = () => {
+        if (!meta) return;
+        $("view").value = "heatmap";
+        $("row").value = 0;
+        $("col").value = 0;
+        $("rows").value = meta.shape[0];
+        $("cols").value = meta.shape[1];
+        render();
+      };
+      $("detail").onclick = () => {
+        $("rows").value = 16;
+        $("cols").value = 12;
+        render();
+      };
+      $("autoscale").onclick = () => {
+        if (!current) return;
+        const st = current.data.stats;
+        if (st.min === null) return;
+        const limit = Math.max(Math.abs(st.min), Math.abs(st.max)) || 1;
+        $("vmin").value = -limit;
+        $("vmax").value = limit;
+        render();
+        $("paramstatus").textContent =
+          "颜色范围已改变；请把新参数同步到另一台电脑。";
+      };
+      $("copy").onclick = async () => {
+        try {
+          const text = exportSettings();
+          try {
+            await navigator.clipboard.writeText(text);
+            $("paramstatus").textContent = "已复制视图参数";
+          } catch {
+            $("parameters").focus();
+            $("parameters").select();
+            $("paramstatus").textContent = "请按 Ctrl+C 复制已选中的参数";
+          }
+        } catch (e) {
+          fail(e);
+        }
+      };
+      function importSettings(text) {
+        const s = JSON.parse(text);
+        if (s.schema !== 1) throw Error("视图参数版本不匹配");
+        validate(s);
+        if (
+          !catalog.some(
+            (x) => x.layer === s.layer && x.point === s.point && x.tp === s.tp,
+          )
+        )
+          throw Error("本机没有参数指定的层 / 边界 / TP");
+        $("layer").value = s.layer;
+        choosePoints(s.point);
+        chooseTP(s.tp);
+        for (const name of fields) $(name).value = s[name];
+      }
+      $("apply").onclick = () => {
+        try {
+          importSettings($("parameters").value);
+          render();
+        } catch (e) {
+          fail(e);
+        }
+      };
+      async function init() {
+        try {
+          const data = await api("/api/catalog");
+          catalog = data.entries;
+          $("label").textContent = data.label;
+          document.title = data.label + " · 矩阵查看器";
+          options(
+            "layer",
+            [...new Set(catalog.map((x) => x.layer))].sort((a, b) => a - b),
+            0,
+          );
+          choosePoints("layer.output");
+          if (location.hash) {
+            try {
+              importSettings(decodeURIComponent(location.hash.slice(1)));
+            } catch (e) {
+              $("paramstatus").textContent = "URL 参数未应用：" + e.message;
+            }
+          }
+          await render();
+        } catch (e) {
+          fail(e);
+        }
+      }
+      init();
+    </script>
+  </body>
+</html>
