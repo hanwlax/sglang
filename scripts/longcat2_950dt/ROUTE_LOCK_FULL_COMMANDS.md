@@ -364,3 +364,29 @@ python3 scripts/longcat2_950dt/replay_tp5_experts.py \
 - `TOTAL.exact_950dt` 比较 950DT 输入的 CPU 重放与该次 dump 的 BF16 实测值。该样本实测为 `-1.0`。`replay_minus_observed` 保留有符号误差。
 - `input_effect_950dt_minus_a3` 是固定 FP8 权重和路由后，仅更换输入造成的 BF16 总和差。可与 `observed_platform_delta`（本样本为 `+0.078125`）并列查看。
 - CPU 按 1×128 分块重建激活的 E4M3FN 量化，使用 checkpoint 的 128×128 FP32 scale 反量化权重。两次 GEMM 都用 FP64 点积后舍入至 BF16，SwiGLU 以 FP32 计算后转 BF16。标准路由的权重按源码转为 BF16，再用 FP32 乘加、最终转 BF16 作为合并参考。现有 dump 只保存专家合并值，单专家贡献和上述中间舍入均由 CPU 重建。
+
+## 12. 固定 A3 输入，分阶段重放专家 494
+
+使用 L1、TP5、row 0 的 A3 `moe.input`。脚本用完整 8192 维输入和中间维 `[1280,1536)` 计算路由加权前的 `down[7203]`。蓝区 A3 的逐阶段标量已放在 `green_route_20261117/reference/A3_expert494_stages.json`，绿区只需提供 FP8 checkpoint 和已有 A3 dump。
+
+```bash
+cd /mnt/share/hanwlax/workspace/sglang-longcat-route-lock
+set -o pipefail
+s=scripts/longcat2_950dt
+runs=/mnt/share/hanwlax/workspace/progress/longcat2_0/route_runs
+out=$(mktemp -d "$runs/expert494_stages.XXXXXX")
+python3 "$s/check_expert494_stages.py" \
+  --format fp8 --model /mnt/share/weight/LongCat-2.0-FP8-cut \
+  --a3 "$runs/A3_route_full_20261117_2110/A3_fixed" \
+  --a3-baseline "$s/green_route_20261117/reference/A3_expert494_stages.json" \
+  --report "$out/fp8.json" | tee "$out/summary.log"
+```
+
+每行 `STAGE` 中，`down` 为 FP8 侧结果，`a3` 为蓝区 INT8 结果，`fp8_minus_int8` 为两端有符号差，`gap_change` 为该差值相对上一步的变化。两次运行的输入 BF16 字节哈希、路由参考、层、坐标与 TP 分片须一致。报告中的 `down_input` 保存该阶段实际用于 CPU 点积的全部 256 个值。
+
+1. `checkpoint_fp64` 以各自 checkpoint 的权重与 scale 反量化，点积和 SwiGLU 均使用 FP64。此时已有的跨侧差值反映两套反量化权重在该输入上的联合效果。
+2. 恢复各路径的运行时权重 scale 精度、第一次激活量化、INT8 GEMM1 的 FP32 缩放、gate/up 的 BF16 舍入。
+3. 恢复 FP32 SwiGLU；FP8 路径把激活结果写为 BF16，INT8 按前一轮融合 SwiGLU 量化参考直接进入第二次量化。
+4. 恢复第二次激活量化、INT8 GEMM2 的 FP32 缩放、最终 BF16 舍入。仅一个平台执行的步骤在另一平台沿用上一步结果。
+
+各步骤累计生效，因此 `gap_change` 对应本顺序下的增量，可能正负抵消。单专家端点用上一轮 CPU 重放值核对（INT8 为 -0.828125，FP8 为 -0.765625），现有运行时 dump 验证到的是四专家合计。

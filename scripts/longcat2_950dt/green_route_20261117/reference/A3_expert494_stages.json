@@ -1,0 +1,29 @@
+{
+  "format": "int8",
+  "scope": {
+    "schema": 1,
+    "layer": 1,
+    "tp": 5,
+    "expert": 494,
+    "row": 0,
+    "col": 7203,
+    "shard": [
+      1280,
+      1536
+    ],
+    "route_sha256": "b48de36bcff7f85d99109697dc37ed6f11242f850c1c22d309b4335f641d355e",
+    "input_bf16_sha256": "3b271da6bd0579a3b8a9b7d4350fd7ac062b76b2c1d9b09d6559fc4cb608f72e"
+  },
+  "down_by_stage": {
+    "checkpoint_fp64": -0.8086453238404712,
+    "runtime_weight_scales": -0.8086453238404712,
+    "quantize_input_1": -0.809020326339781,
+    "gemm1_rescale_fp32_int8": -0.8090203631928069,
+    "gate_up_bf16": -0.8090275526411811,
+    "swiglu_fp32": -0.8090275645073559,
+    "swiglu_output_bf16_fp8": -0.8090275645073559,
+    "quantize_input_2": -0.8265494079296332,
+    "gemm2_rescale_fp32_int8": -0.8265494108200073,
+    "down_bf16": -0.828125
+  }
+}
