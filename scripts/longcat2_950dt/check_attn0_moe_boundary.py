@@ -156,6 +156,10 @@ def decode_params(data):
 
 def read_capture(root, point, tp, route):
     layer, name = POINTS[point]
+    return read_full_bf16(root, layer, name, tp, route)
+
+
+def read_full_bf16(root, layer, name, tp, route):
     path = root / "full" / f"full_L{layer}_{name}_TP{tp}.pt"
     payload = torch.load(path, map_location="cpu", weights_only=True)
     require(

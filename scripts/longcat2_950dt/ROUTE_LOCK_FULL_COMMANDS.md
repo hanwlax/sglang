@@ -320,3 +320,27 @@ unset LC_ROUTE_MODE LC_ROUTE_OUT LC_ROUTE_REFERENCE LC_FULL_DUMP_OUT
 ```
 
 诊断模块默认关闭。不要把固定路由结果用作 GSM8K 精度验收。
+
+## 10. 用已有固定路由 dump 检查 L0/L1 MoE
+
+在绿区 checkout 中运行，输入为两套固定路由的 `full/` 和 `routes/`。只需 CPU PyTorch。
+
+```bash
+cd /mnt/share/hanwlax/workspace/sglang-longcat-route-lock
+set -o pipefail
+runs=/mnt/share/hanwlax/workspace/progress/longcat2_0/route_runs
+log="$runs/moe_cpu_$(date +%Y%m%d_%H%M%S).log"
+python3 scripts/longcat2_950dt/check_moe_branches.py \
+  --a3 "$runs/A3_route_full_20261117_2110/A3_fixed" \
+  --a5 "$runs/A5_fixed_20261117" --threads 4 | tee "$log"
+```
+
+脚本先检查 L1，再检查 L0。每条 `CHECK` 覆盖 852 × 8192 个元素，列出误差分桶、首个差异和最大差异坐标。只有输入和观测输出都逐元素一致的 rank 才合并列在同一个 `ranks` 字段中。
+
+| 检查 | CPU 参考 | 对照的运行时输出 |
+|---|---|---|
+| `identity` | 对每个 token 的固定路由取 ID ≥ 768 的槽位，FP32 求和已缩放的权重，乘本平台的 `moe.input` 后转 BF16 | `moe.identity` |
+| `tp_sum` | 8 个本地 `moe.experts_output` 分别按 FP64 累加后转 BF16、BF16 正序、逆序、两两求和四种方式规约 | `moe.reduced` |
+| `branch_add` | 两个实际保存的 BF16 张量 `moe.reduced + moe.identity` | `moe.branch_output` |
+
+`FOCUS_TP` 给出同一层、同一坐标 `[0,7203]`、同一 TP 的专家本地输出及有符号差值 `950DT − A3`。`FOCUS_SUM` 给出 CPU 求和，`FOCUS_VALUE` 给出运行时边界。各 TP 贡献只加专家本地输出，identity 在规约后加一次。求和候选用于比较舍入效果，实际 HCCL 的执行顺序需独立验证。末行 `COMPLETE` 表示两层计算完成。专家 GEMM 的单算子精度需用其实际操作数验证。
