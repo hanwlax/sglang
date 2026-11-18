@@ -252,18 +252,19 @@ class DSANPUIndexerMixin:
         )
 
         bs = q_lora.shape[0]
+        use_lsa_indexer = bool(self.num_init_tokens or self.num_local_tokens)
 
         # A rank that scores only its own rows projects only those: wq_b is
         # 25.2 MFLOP per token. k stays full width -- every rank writes the whole
         # index-K, which is what lets any of them score a subset. Neox only: the
-        # other branch rotates q and k in one call. Prefill CP is excluded: its
-        # indexer below knows nothing of this shard.
+        # other branch rotates q and k in one call. Prefill CP and LSA bypass the
+        # generic sharded indexer, so keep their query rows intact here.
         uses_prefill_cp = (
             self.dsa_enable_prefill_cp and forward_batch.attn_cp_metadata is not None
         )
         shard = (
             _get_indexer_query_shard(forward_batch, bs)
-            if is_prefill and not uses_prefill_cp
+            if is_prefill and not uses_prefill_cp and not use_lsa_indexer
             else None
         )
         q_sliced_early = shard is not None and self.rotary_emb.is_neox_style
@@ -431,7 +432,7 @@ class DSANPUIndexerMixin:
             )
         pool = get_token_to_kv_pool()
         use_quant_indexer = pool.index_k_scale_buffer is not None
-        if use_quant_indexer and (self.num_init_tokens or self.num_local_tokens):
+        if use_quant_indexer and use_lsa_indexer:
             raise NotImplementedError(
                 "NPU LSA does not support quantized indexer KV. "
                 "Use --kv-cache-dtype bfloat16; INT8 model weights remain supported."
@@ -491,7 +492,7 @@ class DSANPUIndexerMixin:
         if _use_ag_after_qlora and input_on_attn_tp_slices:
             weights = scattered_to_tp_attn_full(weights, forward_batch)
         block_table = get_attn_backend().forward_metadata.block_tables
-        if self.num_init_tokens or self.num_local_tokens:
+        if use_lsa_indexer:
             return self._forward_npu_lsa_indexer(
                 q.view(-1, self.n_heads, self.head_dim),
                 past_key_states,
