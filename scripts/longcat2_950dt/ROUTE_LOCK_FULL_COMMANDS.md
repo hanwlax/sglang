@@ -344,3 +344,23 @@ python3 scripts/longcat2_950dt/check_moe_branches.py \
 | `branch_add` | 两个实际保存的 BF16 张量 `moe.reduced + moe.identity` | `moe.branch_output` |
 
 `FOCUS_TP` 给出同一层、同一坐标 `[0,7203]`、同一 TP 的专家本地输出及有符号差值 `950DT − A3`。`FOCUS_SUM` 给出 CPU 求和，`FOCUS_VALUE` 给出运行时边界。各 TP 贡献只加专家本地输出，identity 在规约后加一次。求和候选用于比较舍入效果，实际 HCCL 的执行顺序需独立验证。末行 `COMPLETE` 表示两层计算完成。专家 GEMM 的单算子精度需用其实际操作数验证。
+
+## 11. 用同一套 950DT 权重重放 L1 TP5 的四个专家
+
+在绿区 checkout 执行。脚本读取两次固定路由 prefill 的第 0 行，各取完整 8192 维输入，用同一套 FP8 checkpoint 计算第 7203 列。TP5 对应 gate/up 输出行和 down 输入列的区间为 `[1280,1536)`。每种输入都只合并普通专家 494、465、82、300 的本地输出，比较目标为 `moe.experts_output`。
+
+```bash
+cd /mnt/share/hanwlax/workspace/sglang-longcat-route-lock
+set -o pipefail
+runs=/mnt/share/hanwlax/workspace/progress/longcat2_0/route_runs
+python3 scripts/longcat2_950dt/replay_tp5_experts.py \
+  --a5 "$runs/A5_fixed_20261117" \
+  --a3 "$runs/A3_route_full_20261117_2110/A3_fixed" \
+  --model /mnt/share/weight/LongCat-2.0-FP8-cut \
+  | tee "$runs/tp5_experts_$(date +%Y%m%d_%H%M%S).log"
+```
+
+- 四行 `EXPERT` 分别给出路由权重、down 投影的 BF16 输出、两种输入的加权贡献及有符号差。
+- `TOTAL.exact_950dt` 比较 950DT 输入的 CPU 重放与该次 dump 的 BF16 实测值。该样本实测为 `-1.0`。`replay_minus_observed` 保留有符号误差。
+- `input_effect_950dt_minus_a3` 是固定 FP8 权重和路由后，仅更换输入造成的 BF16 总和差。可与 `observed_platform_delta`（本样本为 `+0.078125`）并列查看。
+- CPU 按 1×128 分块重建激活的 E4M3FN 量化，使用 checkpoint 的 128×128 FP32 scale 反量化权重。两次 GEMM 都用 FP64 点积后舍入至 BF16，SwiGLU 以 FP32 计算后转 BF16。标准路由的权重按源码转为 BF16，再用 FP32 乘加、最终转 BF16 作为合并参考。现有 dump 只保存专家合并值，单专家贡献和上述中间舍入均由 CPU 重建。
