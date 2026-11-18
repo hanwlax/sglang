@@ -1,0 +1,1638 @@
+{
+  "status": "computed",
+  "run": "/home/hanwlax/workspace/progress/longcat2.0/route_runs/A3_route_full_20261117_2110/A3_fixed",
+  "scope": "L0 TP8 DP1 EP1 prefill",
+  "shape": [
+    852,
+    8192
+  ],
+  "ranks": 8,
+  "checks": 43,
+  "parameters": {
+    "schema": 1,
+    "kind": "longcat_l0_post_attention_norm",
+    "layer": 0,
+    "hidden_size": 8192,
+    "epsilon": 1e-05,
+    "weight_key": "model.layers.0.post_attention_layernorm.0.weight",
+    "source_model": "/home/l00951279/longcat2/LongCat-2.0-INT8-part",
+    "source_shard": "model-00023-of-00141.safetensors",
+    "checkpoint_dtype": "torch.bfloat16",
+    "assumed_runtime_dtype": "torch.bfloat16",
+    "weight_bf16_sha256": "41ff33f16c4bcb1ddbb0160ae8e6ef39d9ac8e35010611e351ff5a4096ee0482",
+    "runtime_weight_verified": false
+  },
+  "runtime_weight_verified": false,
+  "note": "All elements checked, no L2 and no accuracy pass/fail. HCCL sum is not captured. Reduction orders are hypotheses, not exhaustive. The fused norm may use the unrounded residual sum. Checkpoint norm parameters are assumed, not runtime-verified.",
+  "results": [
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 1,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 2,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 3,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 4,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 5,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 6,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "embedding",
+      "tp": 7,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.004364013671875,
+        "reference": -0.004364013671875
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 1,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 2,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 3,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 4,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 5,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 6,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "residual",
+      "tp": 7,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010528564453125
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 1,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 2,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 3,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 4,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 5,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 6,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "moe",
+      "tp": 7,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 1,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 2,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 3,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 4,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 5,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 6,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "rank_agreement",
+      "point": "ffn",
+      "tp": 7,
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "moe_ffn_input_reuse",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 0,
+      "nonfinite_pairs": 0,
+      "first_difference": null,
+      "first_nonfinite": null,
+      "max_abs": 0.0,
+      "max_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.002105712890625
+      },
+      "bins": {
+        "exact": 6979584,
+        "(0,0.0001)": 0,
+        "[0.0001,0.001)": 0,
+        "[0.001,0.01)": 0,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "norm_from_stored_residual",
+      "arithmetic": "torch.float32",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 2378356,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0020904541015625
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.001953125,
+      "max_difference": {
+        "coordinate": [
+          0,
+          1481
+        ],
+        "token_row": 0,
+        "actual": 0.1982421875,
+        "reference": 0.2001953125
+      },
+      "bins": {
+        "exact": 4601228,
+        "(0,0.0001)": 636399,
+        "[0.0001,0.001)": 1741845,
+        "[0.001,0.01)": 112,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "norm_from_stored_residual",
+      "arithmetic": "torch.float64",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 2378352,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0020904541015625
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.001953125,
+      "max_difference": {
+        "coordinate": [
+          0,
+          1481
+        ],
+        "token_row": 0,
+        "actual": 0.1982421875,
+        "reference": 0.2001953125
+      },
+      "bins": {
+        "exact": 4601232,
+        "(0,0.0001)": 636399,
+        "[0.0001,0.001)": 1741841,
+        "[0.001,0.01)": 112,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "reduce_plus_residual",
+      "reduction": "fp64_once",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 2079155,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.001068115234375
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          147,
+          2359
+        ],
+        "token_row": 147,
+        "actual": 0.30859375,
+        "reference": 0.3125
+      },
+      "bins": {
+        "exact": 4900429,
+        "(0,0.0001)": 1670844,
+        "[0.0001,0.001)": 408183,
+        "[0.001,0.01)": 128,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "fp64_once",
+      "arithmetic": "torch.float32",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3115688,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021209716796875
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          244,
+          2359
+        ],
+        "token_row": 244,
+        "actual": 0.328125,
+        "reference": 0.32421875
+      },
+      "bins": {
+        "exact": 3863896,
+        "(0,0.0001)": 846909,
+        "[0.0001,0.001)": 2268526,
+        "[0.001,0.01)": 253,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "fp64_once",
+      "arithmetic": "torch.float64",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3115685,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021209716796875
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          244,
+          2359
+        ],
+        "token_row": 244,
+        "actual": 0.328125,
+        "reference": 0.32421875
+      },
+      "bins": {
+        "exact": 3863899,
+        "(0,0.0001)": 846909,
+        "[0.0001,0.001)": 2268523,
+        "[0.001,0.01)": 253,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "reduce_plus_residual",
+      "reduction": "bf16_serial_0_to_7",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 2428667,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010986328125
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          72,
+          2359
+        ],
+        "token_row": 72,
+        "actual": 0.34375,
+        "reference": 0.34765625
+      },
+      "bins": {
+        "exact": 4550917,
+        "(0,0.0001)": 1884753,
+        "[0.0001,0.001)": 543746,
+        "[0.001,0.01)": 168,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "bf16_serial_0_to_7",
+      "arithmetic": "torch.float32",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3366936,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021820068359375
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          72,
+          2359
+        ],
+        "token_row": 72,
+        "actual": 0.298828125,
+        "reference": 0.302734375
+      },
+      "bins": {
+        "exact": 3612648,
+        "(0,0.0001)": 822350,
+        "[0.0001,0.001)": 2543880,
+        "[0.001,0.01)": 706,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "bf16_serial_0_to_7",
+      "arithmetic": "torch.float64",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3366945,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021820068359375
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          72,
+          2359
+        ],
+        "token_row": 72,
+        "actual": 0.298828125,
+        "reference": 0.302734375
+      },
+      "bins": {
+        "exact": 3612639,
+        "(0,0.0001)": 822354,
+        "[0.0001,0.001)": 2543885,
+        "[0.001,0.01)": 706,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "reduce_plus_residual",
+      "reduction": "bf16_serial_7_to_0",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 2321738,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.001068115234375
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.0048828125,
+      "max_difference": {
+        "coordinate": [
+          486,
+          2359
+        ],
+        "token_row": 486,
+        "actual": 0.2470703125,
+        "reference": 0.251953125
+      },
+      "bins": {
+        "exact": 4657846,
+        "(0,0.0001)": 1819498,
+        "[0.0001,0.001)": 502049,
+        "[0.001,0.01)": 191,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "bf16_serial_7_to_0",
+      "arithmetic": "torch.float32",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3296396,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021209716796875
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          244,
+          2359
+        ],
+        "token_row": 244,
+        "actual": 0.328125,
+        "reference": 0.32421875
+      },
+      "bins": {
+        "exact": 3683188,
+        "(0,0.0001)": 822783,
+        "[0.0001,0.001)": 2473074,
+        "[0.001,0.01)": 539,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "bf16_serial_7_to_0",
+      "arithmetic": "torch.float64",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3296385,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021209716796875
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          244,
+          2359
+        ],
+        "token_row": 244,
+        "actual": 0.328125,
+        "reference": 0.32421875
+      },
+      "bins": {
+        "exact": 3683199,
+        "(0,0.0001)": 822777,
+        "[0.0001,0.001)": 2473070,
+        "[0.001,0.01)": 538,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "reduce_plus_residual",
+      "reduction": "bf16_pairwise",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 2385664,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.0010528564453125,
+        "reference": -0.0010986328125
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          147,
+          2359
+        ],
+        "token_row": 147,
+        "actual": 0.30859375,
+        "reference": 0.3125
+      },
+      "bins": {
+        "exact": 4593920,
+        "(0,0.0001)": 1883415,
+        "[0.0001,0.001)": 502083,
+        "[0.001,0.01)": 166,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "bf16_pairwise",
+      "arithmetic": "torch.float32",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3331074,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021820068359375
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          225,
+          2359
+        ],
+        "token_row": 225,
+        "actual": 0.296875,
+        "reference": 0.29296875
+      },
+      "bins": {
+        "exact": 3648510,
+        "(0,0.0001)": 840897,
+        "[0.0001,0.001)": 2489715,
+        "[0.001,0.01)": 462,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    },
+    {
+      "check": "fused_add_norm",
+      "reduction": "bf16_pairwise",
+      "arithmetic": "torch.float64",
+      "shape": [
+        852,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "elements": 6979584,
+      "different": 3331081,
+      "nonfinite_pairs": 0,
+      "first_difference": {
+        "coordinate": [
+          0,
+          0
+        ],
+        "token_row": 0,
+        "actual": -0.002105712890625,
+        "reference": -0.0021820068359375
+      },
+      "first_nonfinite": null,
+      "max_abs": 0.00390625,
+      "max_difference": {
+        "coordinate": [
+          225,
+          2359
+        ],
+        "token_row": 225,
+        "actual": 0.296875,
+        "reference": 0.29296875
+      },
+      "bins": {
+        "exact": 3648503,
+        "(0,0.0001)": 840897,
+        "[0.0001,0.001)": 2489722,
+        "[0.001,0.01)": 462,
+        "[0.01,0.1)": 0,
+        "[0.1,inf)": 0
+      },
+      "nonfinite_actual": 0,
+      "nonfinite_reference": 0
+    }
+  ]
+}
