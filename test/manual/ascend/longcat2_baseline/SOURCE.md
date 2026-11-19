@@ -111,3 +111,12 @@ runtimes, is recorded in the receipt together with the changed source hash, and
 does not change model arithmetic or the evaluator. Omit it to preserve the
 upstream timeout. Rebuild private runtimes after selecting it. This was added
 after A3 DP0 completed loading while other hosts were still reading safetensors.
+
+## Same-hardware INT8 / FP8 evaluation after the DeepEP combine fix
+
+`../longcat2_int8_fp8_compare/` is versioned on this same capture branch. Its
+[Chinese guide](../longcat2_int8_fp8_compare/README_ZH.md) starts with fetching
+the branch and covers launcher freezing, both weight formats, the same GSM8K
+subset and per-question comparison. It wraps the existing validated `run.sh`;
+it does not regenerate the pinned capture runtime or reinstall DeepEP. The
+launch receipt hashes the actual inference sources and installed DeepEP files.

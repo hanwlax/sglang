@@ -1,5 +1,9 @@
 # A3 full-layer numerical baseline — TP64 / attention DP4 / EP64
 
+950DT repaired-DeepEP INT8/FP8 paired GSM8K evaluation (graphs + NEXTN):
+see [the pull-to-evaluation guide](../longcat2_int8_fp8_compare/README_ZH.md).
+It reuses the working inference launcher and saves per-question results.
+
 A5 full38 Eliza collection: see [A5_ELIZA_FULL_CAPTURE_ZH.md](A5_ELIZA_FULL_CAPTURE_ZH.md)
 for the matching FP8/DP2 launch, replay and full-payload verification.
 
